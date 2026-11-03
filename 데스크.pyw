@@ -266,6 +266,35 @@ def legacy_counts(cur):
     return out
 
 
+ONLINE_SEC = 15          # 데스크 신호가 이 시간 넘게 없으면 꺼진 것으로 봄
+STALE_CALL_SEC = 180     # 이보다 오래된 호출은 울리지 않음
+
+
+def desk_alive(live, desk_id, cache):
+    """데스크가 켜져 있는지: 서버 시각 기록이 최근이거나, 값이 최근에 바뀌었으면 켜짐"""
+    info = dig(live, "desks", desk_id)
+    if not isinstance(info, dict):
+        return False
+    seen, now = info.get("seen"), time.time()
+    prev = cache.get(desk_id)
+    if prev is None or prev[0] != seen:
+        cache[desk_id] = prev = (seen, now)
+    fresh_local = now - prev[1] < ONLINE_SEC
+    fresh_clock = isinstance(seen, (int, float)) and abs(now * 1000 - seen) < ONLINE_SEC * 1000
+    return fresh_local or fresh_clock
+
+
+def call_age(call):
+    """호출 후 지난 초 (오늘 호출이 아니면 큰 값)"""
+    try:
+        if call.get("d") != today():
+            return 10 ** 9
+        t = datetime.combine(date.today(), datetime.strptime(call.get("time", ""), "%H:%M:%S").time())
+        return (datetime.now() - t).total_seconds()
+    except (ValueError, AttributeError):
+        return 10 ** 9
+
+
 def summary_text(counts):
     parts = ["%s %d" % (NAMES[i], c) for i, c in enumerate(counts) if c]
     return " · ".join(parts) if parts else "업무 기록 없음"
@@ -707,7 +736,6 @@ class TaskDetail:
 
 # ===== 데스크 프로그램 =====
 CONFIG_FILE = DATA_DIR / "desk.json"
-ONLINE_SEC = 30
 
 
 class DeskApp:
@@ -736,6 +764,7 @@ class DeskApp:
         self.last_call = {r: None for r in ROOMS}
         self.popups = {}
         self.unacked = set()
+        self.notes = {r: "" for r in ROOMS}
         self.seen = {}
         self.assign_hold = 0
         self.w = {}
@@ -753,6 +782,7 @@ class DeskApp:
         self.streams = []
         self.live, self.events, self.online = {}, {}, False
         self.last_call = {r: None for r in ROOMS}
+        self.notes = {r: "" for r in ROOMS}
         key = self.cfg.get("key")
         if not key:
             self.set_status("연결 설정 필요 — ⚙ 설정을 눌러주세요", "#a44b4b")
@@ -809,7 +839,13 @@ class DeskApp:
         self.root.after(100, self.pump)
 
     def set_status(self, text, color):
-        self.w["status"].config(text=text, fg=color)
+        if color == "#a44b4b":   # 끊김: 크게, 빨간 바탕
+            self.w["status"].config(text="⚠ " + text + "  — 화면 숫자가 최신이 아닐 수 있습니다",
+                                    fg="white", bg="#c0392b", font=(FONT, 11, "bold"))
+        else:
+            self.w["status"].config(text=text, fg=color, bg=BG, font=(FONT, 9))
+        if hasattr(self, "notes"):
+            self.render()
 
     # ---------- 화면 ----------
     def build(self):
@@ -821,7 +857,7 @@ class DeskApp:
         self.w["title"].pack(side="left")
         tk.Button(top, text="⚙ 설정", relief="flat", bg="#e8eef9", command=self.settings).pack(side="right")
         tk.Button(top, text="📊 월별 통계", relief="flat", bg="#e8eef9", command=self.stats).pack(side="right", padx=6)
-        self.w["status"] = tk.Label(f, bg=BG, anchor="w", font=(FONT, 9))
+        self.w["status"] = tk.Label(f, bg=BG, anchor="w", font=(FONT, 9), padx=4)
         self.w["status"].pack(fill="x", pady=(2, 6))
 
         mine = tk.Frame(f, bg="#fff8e6", padx=10, pady=7)
@@ -888,18 +924,7 @@ class DeskApp:
     def desk_online(self, desk_id):
         if desk_id == self.cfg["id"]:
             return True
-        info = dig(self.live, "desks", desk_id)
-        if not isinstance(info, dict):
-            return False
-        seen = info.get("seen")
-        now = time.time()
-        prev = self.seen.get(desk_id)
-        if prev is None or prev[0] != seen:
-            self.seen[desk_id] = (seen, now)
-            prev = self.seen[desk_id]
-        fresh_local = now - prev[1] < ONLINE_SEC
-        fresh_clock = isinstance(seen, (int, float)) and abs(now * 1000 - seen) < ONLINE_SEC * 1000
-        return fresh_local or fresh_clock
+        return desk_alive(self.live, desk_id, self.seen)
 
     def owner(self, room):
         """(담당 데스크 id, 이름, 온라인 여부)"""
@@ -923,6 +948,9 @@ class DeskApp:
             else:
                 w["big"].config(text="대기 %d명" % waiting)
             w["done"].config(text="오늘 진료 완료 %d명" % patients)
+            stale = not self.online
+            w["big"].config(fg="#9aa6b8" if stale else "#1d62b2")
+            w["done"].config(fg="#9aa6b8" if stale else "#24824d")
             for i, lab in enumerate(w["rows"]):
                 lab.config(text="%s   %d" % (NAMES[i], counts[i]),
                            fg="#22324a" if counts[i] else "#9aa6b8")
@@ -945,8 +973,10 @@ class DeskApp:
                 w[key].config(bg=color)
             for child in list(w["head"].winfo_children()) + list(w["tl"].winfo_children())[:1]:
                 child.config(bg=color)
-            w["call"].config(text=("🔔 호출됨! 환자 안내 후 '호출 확인'\n" if alert else "") + txt,
-                             fg="#bd4429" if alert else "#56647b")
+            note = self.notes.get(r, "") if hasattr(self, "notes") else ""
+            w["call"].config(text=("🔔 호출됨! 환자 안내 후 '호출 확인'\n" if alert else "") + txt +
+                             ("\n" + note if note else ""),
+                             fg="#bd4429" if (alert or note.startswith("⚠")) else "#56647b")
             if alert:
                 w["ack"].pack(fill="x", pady=(5, 0), after=w["btns"])
             else:
@@ -979,7 +1009,7 @@ class DeskApp:
             body = {"name": self.cfg.get("name", "데스크"), "seen": {".sv": "timestamp"}}
             db, did = self.db, self.cfg["id"]
             self.runner.submit(lambda: db.put("live/desks/" + did, body))
-        self.root.after(10000, self.heartbeat)
+        self.root.after(5000, self.heartbeat)
 
     def cleanup_old_tickets(self):
         d = today()
@@ -1047,19 +1077,35 @@ class DeskApp:
     def check_calls(self):
         for r in ROOMS:
             call = dig(self.live, "rooms", r, "call")
-            cid = call.get("id") if isinstance(call, dict) else None
+            if not isinstance(call, dict):
+                call = {}
+            cid = call.get("id")
+            key = (cid, bool(call.get("cancelled")))
             if self.last_call[r] is None:
-                self.last_call[r] = cid or ""
+                self.last_call[r] = key
                 continue
-            if cid and cid != self.last_call[r]:
-                self.last_call[r] = cid
-                if call.get("d") != today():
-                    continue
-                oid, _, on = self.owner(r)
-                if oid == self.cfg["id"]:
-                    self.alert(r, call.get("time", ""), False)
-                elif not oid or not on:
-                    self.alert(r, call.get("time", ""), True)
+            if not cid or key == self.last_call[r]:
+                continue
+            prev_id = self.last_call[r][0] if isinstance(self.last_call[r], tuple) else None
+            self.last_call[r] = key
+            if call.get("cancelled"):            # 의사가 호출 취소
+                if cid == prev_id or r in self.unacked:
+                    self.ack(r)
+                self.notes[r] = "호출 취소됨 (%s 호출)" % call.get("time", "")[:5]
+                self.render()
+                continue
+            if cid == prev_id or call.get("d") != today():
+                continue
+            if call_age(call) > STALE_CALL_SEC:   # 연결 끊긴 사이 지난 호출: 울리지 않음
+                self.notes[r] = "⚠ 놓친 호출 %s (연결이 끊겨 있었음)" % call.get("time", "")[:5]
+                self.render()
+                continue
+            self.notes[r] = ""
+            oid, _, on = self.owner(r)
+            if oid == self.cfg["id"]:
+                self.alert(r, call.get("time", ""), False)
+            elif not oid or not on:
+                self.alert(r, call.get("time", ""), True)
 
     def alert(self, r, when, unowned):
         self.unacked.add(r)

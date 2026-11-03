@@ -266,6 +266,35 @@ def legacy_counts(cur):
     return out
 
 
+ONLINE_SEC = 15          # 데스크 신호가 이 시간 넘게 없으면 꺼진 것으로 봄
+STALE_CALL_SEC = 180     # 이보다 오래된 호출은 울리지 않음
+
+
+def desk_alive(live, desk_id, cache):
+    """데스크가 켜져 있는지: 서버 시각 기록이 최근이거나, 값이 최근에 바뀌었으면 켜짐"""
+    info = dig(live, "desks", desk_id)
+    if not isinstance(info, dict):
+        return False
+    seen, now = info.get("seen"), time.time()
+    prev = cache.get(desk_id)
+    if prev is None or prev[0] != seen:
+        cache[desk_id] = prev = (seen, now)
+    fresh_local = now - prev[1] < ONLINE_SEC
+    fresh_clock = isinstance(seen, (int, float)) and abs(now * 1000 - seen) < ONLINE_SEC * 1000
+    return fresh_local or fresh_clock
+
+
+def call_age(call):
+    """호출 후 지난 초 (오늘 호출이 아니면 큰 값)"""
+    try:
+        if call.get("d") != today():
+            return 10 ** 9
+        t = datetime.combine(date.today(), datetime.strptime(call.get("time", ""), "%H:%M:%S").time())
+        return (datetime.now() - t).total_seconds()
+    except (ValueError, AttributeError):
+        return 10 ** 9
+
+
 def summary_text(counts):
     parts = ["%s %d" % (NAMES[i], c) for i, c in enumerate(counts) if c]
     return " · ".join(parts) if parts else "업무 기록 없음"
@@ -762,6 +791,10 @@ class DoctorApp:
         self.room_node = {}
         self.events = {}
         self.legacy = {}
+        self.live = {}
+        self.seen = {}
+        self.last_call_sent = 0
+        self.undo_eid = None
         self.events_day = None
         self.online = False
         self.sending = False
@@ -772,7 +805,7 @@ class DoctorApp:
         self.start_hotkeys()
         self.root.after(100, self.pump)
         self.root.after(1500, self.flush)
-        self.root.after(15000, self.tick)
+        self.root.after(5000, self.tick)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
 
     @property
@@ -783,7 +816,7 @@ class DoctorApp:
     def connect(self):
         for s in self.streams:
             s.stop()
-        self.streams, self.room_node, self.events, self.online, self.legacy = [], {}, {}, False, {}
+        self.streams, self.room_node, self.events, self.online, self.legacy, self.live = [], {}, {}, False, {}, {}
         key = self.cfg.get("key")
         if not key:
             self.db = None
@@ -809,7 +842,9 @@ class DoctorApp:
         self.legacy = {}
         self.streams = [Stream(self.db, "live/rooms/" + self.room, self.inbox, "room"),
                         Stream(self.db, "days/" + self.events_day, self.inbox, "events"),
-                        Stream(self.db, "legacy/%s/%s" % (self.room, self.events_day), self.inbox, "legacy")]
+                        Stream(self.db, "legacy/%s/%s" % (self.room, self.events_day), self.inbox, "legacy"),
+                        Stream(self.db, "live/assign", self.inbox, "assign"),
+                        Stream(self.db, "live/desks", self.inbox, "desks")]
         for s in self.streams:
             s.start()
 
@@ -830,6 +865,8 @@ class DoctorApp:
                     continue
                 if tag == "legacy":
                     self.legacy = legacy_apply(self.legacy, ev, path, data)
+                elif tag in ("assign", "desks"):
+                    self.live = mirror_apply(self.live, ev, "/" + tag + path.rstrip("/") if path != "/" else "/" + tag, data)
                 elif tag == "room":
                     self.room_node = mirror_apply(self.room_node, ev, path, data)
                 else:
@@ -877,8 +914,20 @@ class DoctorApp:
 
         self.w["call"] = tk.Button(o, font=(FONT, 12, "bold"), command=lambda: self.on_action("call"))
         self.w["call"].pack(fill="x", ipady=4)
-        self.w["callinfo"] = tk.Label(o, bg=BG, fg="#56647b", font=(FONT, 9), anchor="w")
-        self.w["callinfo"].pack(fill="x", pady=(2, 4))
+        crow = tk.Frame(o, bg=BG)
+        crow.pack(fill="x", pady=(2, 0))
+        self.w["callinfo"] = tk.Label(crow, bg=BG, fg="#56647b", font=(FONT, 9), anchor="w")
+        self.w["callinfo"].pack(side="left")
+        self.w["cancel"] = tk.Button(crow, text="호출 취소", relief="flat", bg="#f3e3e3",
+                                     font=(FONT, 9), command=self.cancel_call)
+        self.w["recv"] = tk.Label(o, bg=BG, font=(FONT, 9), anchor="w")
+        self.w["recv"].pack(fill="x", pady=(0, 4))
+        mrow = tk.Frame(o, bg=BG)
+        mrow.pack(fill="x", pady=(0, 2))
+        self.w["msg"] = tk.Label(mrow, bg=BG, fg="#bd4429", font=(FONT, 10, "bold"), anchor="w")
+        self.w["msg"].pack(side="left")
+        self.w["undo"] = tk.Button(mrow, text="↶ 되돌리기", relief="flat", bg="#ffe9b8",
+                                   font=(FONT, 10, "bold"), command=self.undo_last)
 
         tk.Label(o, text="업무 + 를 누르면 진료 완료(대기 −1)로 함께 기록됩니다. − 는 되돌리기.",
                  bg=BG, fg="#65738a", font=(FONT, 8), anchor="w").pack(fill="x", pady=(0, 3))
@@ -912,8 +961,6 @@ class DoctorApp:
         self.w["pending"].pack(side="left", padx=8)
         tk.Checkbutton(bottom, text="항상 위", variable=self.top_var, bg=BG,
                        command=self.toggle_top).pack(side="right")
-        self.w["msg"] = tk.Label(o, bg=BG, fg="#bd4429", font=(FONT, 10, "bold"), anchor="w")
-        self.w["msg"].pack(fill="x")
         self.render()
 
     def toggle_top(self):
@@ -934,7 +981,8 @@ class DoctorApp:
         completed = len(done) + sum(counts)
         connected = self.db is not None and (self.online or self.room_node)
         w = self.waiting()
-        self.w["wait"].config(text=("대기 %d명" % w) if connected else "대기 —")
+        self.w["wait"].config(text=("대기 %d명" % w) if connected else "대기 —",
+                              fg="#17539b" if self.online else "#9aa6b8")
         self.w["done"].config(text="진료 완료 %d명" % completed)
         kl = self.key_label("call")
         if connected and w > 0:
@@ -945,9 +993,31 @@ class DoctorApp:
                                   bg="#eceff3", fg="#8a96a8")
         call = self.room_node.get("call") if isinstance(self.room_node, dict) else None
         if isinstance(call, dict) and call.get("d") == today():
-            self.w["callinfo"].config(text="마지막 호출 %s" % call.get("time", "")[:5])
+            self.w["callinfo"].config(text="마지막 호출 %s%s" % (call.get("time", "")[:5],
+                                                              "  (취소됨)" if call.get("cancelled") else ""))
+            if not call.get("cancelled") and call_age(call) < 300:
+                self.w["cancel"].pack(side="right")
+            else:
+                self.w["cancel"].pack_forget()
         else:
             self.w["callinfo"].config(text="오늘 호출 없음")
+            self.w["cancel"].pack_forget()
+        # 호출 받을 데스크 표시
+        if self.db is None or not self.online:
+            self.w["recv"].config(text="", fg="#56647b")
+        else:
+            oid = dig(self.live, "assign", self.room) or ""
+            if oid and desk_alive(self.live, oid, self.seen):
+                self.w["recv"].config(text="호출 받는 곳: %s" % (dig(self.live, "desks", oid, "name") or "데스크"),
+                                      fg="#21804c")
+            else:
+                alive = [d for d in (dig(self.live, "desks") or {}) if desk_alive(self.live, d, self.seen)]
+                if alive:
+                    self.w["recv"].config(text="담당 데스크 없음 → 켜진 데스크 %d곳 모두에 알림" % len(alive),
+                                          fg="#8a6d1d")
+                else:
+                    self.w["recv"].config(text="⚠ 켜진 데스크가 없습니다 — 호출이 전달되지 않아요",
+                                          fg="#c0392b")
         for i, (key, val) in enumerate(self.w["rows"]):
             key.config(text=self.key_label("task%d" % i))
             val.config(text=str(counts[i]))
@@ -972,17 +1042,34 @@ class DoctorApp:
         n = len(self.outbox)
         self.w["pending"].config(text=("미전송 %d건 (연결되면 자동 전송)" % n) if n else "")
 
-    def flash(self, text):
+    def flash(self, text, undo_eid=None):
         self.w["msg"].config(text=text)
+        self.undo_eid = undo_eid
+        if undo_eid:
+            self.w["undo"].pack(side="right")
+        else:
+            self.w["undo"].pack_forget()
         if self.flash_job:
             self.root.after_cancel(self.flash_job)
-        self.flash_job = self.root.after(3500, lambda: self.w["msg"].config(text=""))
+        self.flash_job = self.root.after(6000 if undo_eid else 3500, self.clear_flash)
+
+    def clear_flash(self):
+        self.w["msg"].config(text="")
+        self.w["undo"].pack_forget()
+        self.undo_eid = None
+
+    def undo_last(self):
+        eid = self.undo_eid
+        self.clear_flash()
+        if eid and (dig(self.events, "events", eid) or any(op["eid"] == eid for op in self.outbox)):
+            self.remove_item(eid, "ev")
+            self.flash("되돌렸습니다.")
 
     def tick(self):
         if self.db and self.events_day != today():
             self.start_streams()
-            self.render()
-        self.root.after(15000, self.tick)
+        self.render()
+        self.root.after(5000, self.tick)
 
     # ---------- 동작 ----------
     def on_action(self, action):
@@ -1028,6 +1115,7 @@ class DoctorApp:
         if day == self.events_day:
             mirror.append(("/events/" + eid, ev))
         self.queue_op(eid, patch, mirror)
+        self.flash("✔ %s 기록 (진료 완료 +1)" % NAMES[task], undo_eid=eid)
 
     def unrecord(self, task):
         mine = sorted((k for k, e in (dig(self.events, "events") or {}).items()
@@ -1117,6 +1205,10 @@ class DoctorApp:
         if self.waiting() <= 0:
             self.flash("대기 환자가 없어 호출하지 않았습니다.")
             return
+        if time.time() - self.last_call_sent < 3:
+            self.flash("방금 호출했습니다.")
+            return
+        self.last_call_sent = time.time()
         val = {"id": new_id(), "time": now_hms(), "d": today()}
         db, room = self.db, self.room
 
@@ -1130,6 +1222,20 @@ class DoctorApp:
             self.flash("호출 실패: %s" % e)
 
         self.runner.submit(lambda: db.put("live/rooms/%s/call" % room, val), ok, fail)
+
+    def cancel_call(self):
+        call = self.room_node.get("call") if isinstance(self.room_node, dict) else None
+        if not isinstance(call, dict) or call.get("cancelled") or self.db is None:
+            return
+        db, room = self.db, self.room
+
+        def ok(_):
+            self.room_node = mirror_apply(self.room_node, "put", "/call/cancelled", True)
+            self.flash("호출을 취소했습니다.")
+            self.render()
+
+        self.runner.submit(lambda: db.put("live/rooms/%s/call/cancelled" % room, True), ok,
+                           lambda e: self.flash("취소 실패: %s" % e))
 
     # ---------- 단축키 ----------
     def start_hotkeys(self):
