@@ -115,6 +115,32 @@ class FirebaseDB:
     def get(self, path, params=None):
         return self._req("GET", path, params=params, timeout=15)
 
+    def get_etag(self, path):
+        """(값, ETag) — 동시에 두 곳에서 고치는 것을 막는 조건부 쓰기용"""
+        req = urllib.request.Request(self.full(path), headers={"X-Firebase-ETag": "true"})
+        try:
+            with urllib.request.urlopen(req, timeout=6, context=self.ctx) as r:
+                raw, tag = r.read(), r.headers.get("ETag")
+        except (urllib.error.URLError, OSError) as e:
+            raise ConnectionError("인터넷 연결 실패: %s" % getattr(e, "reason", e))
+        return (normalize(json.loads(raw.decode("utf-8"))) if raw else None), tag
+
+    def put_if(self, path, value, etag):
+        """ETag가 그대로일 때만 저장. 다른 곳에서 먼저 바꿨으면 False"""
+        data = json.dumps(value, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(self.full(path), data=data, method="PUT",
+                                     headers={"Content-Type": "application/json", "if-match": etag})
+        try:
+            with urllib.request.urlopen(req, timeout=6, context=self.ctx) as r:
+                r.read()
+            return True
+        except urllib.error.HTTPError as e:
+            if e.code == 412:
+                return False
+            raise ConnectionError("서버 오류 %s" % e.code)
+        except (urllib.error.URLError, OSError) as e:
+            raise ConnectionError("인터넷 연결 실패: %s" % getattr(e, "reason", e))
+
     def put(self, path, value):
         return self._req("PUT", path, value)
 
@@ -135,12 +161,8 @@ class Stream(threading.Thread):
         self.resp = None
 
     def stop(self):
+        # 소켓을 다른 스레드에서 강제로 닫으면 Windows에서 멈출 수 있어 플래그만 세움
         self.stopped.set()
-        try:
-            if self.resp is not None:
-                self.resp.close()
-        except Exception:
-            pass
 
     def run(self):
         delay = 1
@@ -396,6 +418,23 @@ def play_sound(name):
         pass
 
 
+def quit_now(root, cfg_path=None, cfg=None, last_job=None):
+    """창을 바로 닫고 프로세스 종료 (네트워크 대기 때문에 '응답 없음'이 뜨지 않도록)"""
+    try:
+        if cfg_path is not None and cfg is not None:
+            cfg["geometry"] = root.geometry()
+            save_json(cfg_path, cfg)
+        root.withdraw()
+        root.update()
+    except Exception:
+        pass
+    if last_job:
+        t = threading.Thread(target=last_job, daemon=True)
+        t.start()
+        t.join(2.0)
+    os._exit(0)
+
+
 def play_alert():
     if sys.platform == "win32":
         try:
@@ -471,6 +510,8 @@ class StatsWindow:
         self.summary.pack(fill="x", padx=10, pady=6)
         foot = tk.Frame(self.win, padx=10, pady=8)
         foot.pack(fill="x")
+        self.win.bind("<Configure>", lambda e: (self.summary.config(wraplength=max(300, self.win.winfo_width() - 30)),
+                                                self.detail.config(wraplength=max(300, self.win.winfo_width() - 30))))
         tk.Button(foot, text="일별 요약 CSV", command=self.export_daily).pack(side="left")
         tk.Button(foot, text="전체 기록 CSV", command=self.export_events).pack(side="left", padx=8)
         self.load()
@@ -553,7 +594,8 @@ class StatsWindow:
         lines = []
         for r in self.rooms:
             p, t = totals[r]
-            lines.append("진료실 %s — 진료 완료 %d명, 업무 %d건  |  %s" % (r, p, sum(t), summary_text(t)))
+            lines.append("진료실 %s — 진료 완료 %d명, 업무 %d건" % (r, p, sum(t)))
+            lines.append("    " + summary_text(t))
             busy = ["%d시 %d" % (h, n) for h, n in enumerate(hours[r]) if n]
             if busy:
                 lines.append("    시간대별 진료 완료: " + " · ".join(busy))
@@ -1151,11 +1193,32 @@ class DeskApp:
         self.unacked.discard(r)
         call = dig(self.live, "rooms", r, "call")
         if was and not remote and self.db and isinstance(call, dict) and not call.get("acked"):
-            # 확인했다는 사실을 진료실·다른 데스크에 알림
+            # 환자를 들여보냄 → 대기 −1, 진료실·다른 데스크에 '확인' 알림
             name = self.cfg.get("name", "데스크")
-            self.live = mirror_apply(self.live, "put", "/rooms/%s/call/acked" % r, name)
             db = self.db
-            self.runner.submit(lambda: db.put("live/rooms/%s/call/acked" % r, name))
+            self.live = mirror_apply(self.live, "put", "/rooms/%s/call/acked" % r, name)
+            ids = tickets_today(dig(self.live, "rooms", r))
+            if ids:   # 화면에 바로 반영
+                self.live = mirror_apply(self.live, "put", "/rooms/%s/queue/%s" % (r, ids[0]), None)
+
+            def job():
+                for _ in range(3):
+                    cur, tag = db.get_etag("live/rooms/%s/call" % r)
+                    if not isinstance(cur, dict) or cur.get("acked") or cur.get("cancelled"):
+                        return "skip"          # 다른 데스크가 먼저 확인함
+                    queue_now = db.get("live/rooms/%s/queue" % r) or {}
+                    tids = sorted(k for k, v in queue_now.items()
+                                  if isinstance(v, dict) and v.get("d") == today())
+                    new = dict(cur, acked=name)
+                    if tids:
+                        new["ticket"] = {"id": tids[0], "v": queue_now[tids[0]]}
+                    if db.put_if("live/rooms/%s/call" % r, new, tag):
+                        if tids:
+                            db.delete("live/rooms/%s/queue/%s" % (r, tids[0]))
+                        return "ok"
+                return "skip"
+
+            self.runner.submit(job, fail=self.fail)
         p = self.popups.pop(r, None)
         if p is not None:
             try:
@@ -1262,22 +1325,20 @@ class DeskApp:
         tk.Button(b, text="취소", width=10, command=win.destroy).pack(side="left", padx=4)
 
     def close(self):
+        job = None
         if self.db:
-            try:
-                db, did = self.db, self.cfg["id"]
-                patch = {"live/desks/" + did: None}
-                for r in ROOMS:
-                    if dig(self.live, "assign", r) == did:
-                        patch["live/assign/" + r] = None
-                db.patch("", patch)
-            except Exception:
-                pass
-        self.cfg["geometry"] = self.root.geometry()
-        save_json(CONFIG_FILE, self.cfg)
-        for s in self.streams:
-            s.stop()
-        self.runner.close()
-        self.root.destroy()
+            db, did = self.db, self.cfg["id"]
+            patch = {"live/desks/" + did: None}
+            for r in ROOMS:
+                if dig(self.live, "assign", r) == did:
+                    patch["live/assign/" + r] = None
+
+            def job():
+                try:
+                    db._req("PATCH", "", patch, timeout=2)
+                except Exception:
+                    pass
+        quit_now(self.root, CONFIG_FILE, self.cfg, job)
 
 
 if __name__ == "__main__":

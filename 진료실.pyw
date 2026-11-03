@@ -115,6 +115,32 @@ class FirebaseDB:
     def get(self, path, params=None):
         return self._req("GET", path, params=params, timeout=15)
 
+    def get_etag(self, path):
+        """(값, ETag) — 동시에 두 곳에서 고치는 것을 막는 조건부 쓰기용"""
+        req = urllib.request.Request(self.full(path), headers={"X-Firebase-ETag": "true"})
+        try:
+            with urllib.request.urlopen(req, timeout=6, context=self.ctx) as r:
+                raw, tag = r.read(), r.headers.get("ETag")
+        except (urllib.error.URLError, OSError) as e:
+            raise ConnectionError("인터넷 연결 실패: %s" % getattr(e, "reason", e))
+        return (normalize(json.loads(raw.decode("utf-8"))) if raw else None), tag
+
+    def put_if(self, path, value, etag):
+        """ETag가 그대로일 때만 저장. 다른 곳에서 먼저 바꿨으면 False"""
+        data = json.dumps(value, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(self.full(path), data=data, method="PUT",
+                                     headers={"Content-Type": "application/json", "if-match": etag})
+        try:
+            with urllib.request.urlopen(req, timeout=6, context=self.ctx) as r:
+                r.read()
+            return True
+        except urllib.error.HTTPError as e:
+            if e.code == 412:
+                return False
+            raise ConnectionError("서버 오류 %s" % e.code)
+        except (urllib.error.URLError, OSError) as e:
+            raise ConnectionError("인터넷 연결 실패: %s" % getattr(e, "reason", e))
+
     def put(self, path, value):
         return self._req("PUT", path, value)
 
@@ -135,12 +161,8 @@ class Stream(threading.Thread):
         self.resp = None
 
     def stop(self):
+        # 소켓을 다른 스레드에서 강제로 닫으면 Windows에서 멈출 수 있어 플래그만 세움
         self.stopped.set()
-        try:
-            if self.resp is not None:
-                self.resp.close()
-        except Exception:
-            pass
 
     def run(self):
         delay = 1
@@ -396,6 +418,23 @@ def play_sound(name):
         pass
 
 
+def quit_now(root, cfg_path=None, cfg=None, last_job=None):
+    """창을 바로 닫고 프로세스 종료 (네트워크 대기 때문에 '응답 없음'이 뜨지 않도록)"""
+    try:
+        if cfg_path is not None and cfg is not None:
+            cfg["geometry"] = root.geometry()
+            save_json(cfg_path, cfg)
+        root.withdraw()
+        root.update()
+    except Exception:
+        pass
+    if last_job:
+        t = threading.Thread(target=last_job, daemon=True)
+        t.start()
+        t.join(2.0)
+    os._exit(0)
+
+
 def play_alert():
     if sys.platform == "win32":
         try:
@@ -471,6 +510,8 @@ class StatsWindow:
         self.summary.pack(fill="x", padx=10, pady=6)
         foot = tk.Frame(self.win, padx=10, pady=8)
         foot.pack(fill="x")
+        self.win.bind("<Configure>", lambda e: (self.summary.config(wraplength=max(300, self.win.winfo_width() - 30)),
+                                                self.detail.config(wraplength=max(300, self.win.winfo_width() - 30))))
         tk.Button(foot, text="일별 요약 CSV", command=self.export_daily).pack(side="left")
         tk.Button(foot, text="전체 기록 CSV", command=self.export_events).pack(side="left", padx=8)
         self.load()
@@ -553,7 +594,8 @@ class StatsWindow:
         lines = []
         for r in self.rooms:
             p, t = totals[r]
-            lines.append("진료실 %s — 진료 완료 %d명, 업무 %d건  |  %s" % (r, p, sum(t), summary_text(t)))
+            lines.append("진료실 %s — 진료 완료 %d명, 업무 %d건" % (r, p, sum(t)))
+            lines.append("    " + summary_text(t))
             busy = ["%d시 %d" % (h, n) for h, n in enumerate(hours[r]) if n]
             if busy:
                 lines.append("    시간대별 진료 완료: " + " · ".join(busy))
@@ -914,8 +956,7 @@ class DoctorApp:
 
         self.w["call"] = tk.Button(o, font=(FONT, 12, "bold"), command=lambda: self.on_action("call"))
         self.w["call"].pack(fill="x", ipady=4)
-        self.w["next"] = tk.Button(o, text="다음 환자 호출 (대기 −1)", font=(FONT, 9), relief="flat",
-                                   bg="#e8eef9", command=lambda: self.call(force_new=True))
+        self.w["next"] = tk.Frame(o)   # (사용 안 함)
         crow = tk.Frame(o, bg=BG)
         crow.pack(fill="x", pady=(2, 0))
         self.w["callinfo"] = tk.Label(crow, bg=BG, fg="#56647b", font=(FONT, 9), anchor="w")
@@ -931,7 +972,7 @@ class DoctorApp:
         self.w["undo"] = tk.Button(mrow, text="↶ 되돌리기", relief="flat", bg="#ffe9b8",
                                    font=(FONT, 10, "bold"), command=self.undo_last)
 
-        tk.Label(o, text="호출하면 대기 −1 (환자 입실) · 업무 + 는 진료 완료로 기록 · − 는 되돌리기",
+        tk.Label(o, text="데스크가 호출 확인(환자 입실)하면 대기 −1 · 업무 + 는 진료 완료 기록 · − 는 되돌리기",
                  bg=BG, fg="#65738a", font=(FONT, 8), anchor="w").pack(fill="x", pady=(0, 3))
         self.w["rows"] = []
         for i, name in enumerate(NAMES):
@@ -986,18 +1027,13 @@ class DoctorApp:
         self.w["wait"].config(text=("대기 %d명" % w) if connected else "대기 —",
                               fg="#17539b" if self.online else "#9aa6b8")
         self.w["done"].config(text="진료 완료 %d명" % completed)
+        self.w["next"].pack_forget()
         if self.recall_mode():
-            self.w["call"].config(text="🔁 다시 호출 (같은 환자, 대기 변화 없음)", bg="#ffe9b8", fg="#6b4a00")
-            if w > 0:
-                self.w["next"].pack(fill="x", pady=(3, 0), after=self.w["call"])
-            else:
-                self.w["next"].pack_forget()
+            self.w["call"].config(text="🔁 다시 호출 (데스크 확인 전)", bg="#ffe9b8", fg="#6b4a00")
+        elif connected and w > 0:
+            self.w["call"].config(text="📢 다음 환자 호출", bg="#cfe3ff", fg="#12345a")
         else:
-            self.w["next"].pack_forget()
-            if connected and w > 0:
-                self.w["call"].config(text="📢 다음 환자 호출 (대기 −1)", bg="#cfe3ff", fg="#12345a")
-            else:
-                self.w["call"].config(text="대기 환자 없음", bg="#eceff3", fg="#8a96a8")
+            self.w["call"].config(text="대기 환자 없음", bg="#eceff3", fg="#8a96a8")
         call = self.room_node.get("call") if isinstance(self.room_node, dict) else None
         if isinstance(call, dict) and call.get("d") == today():
             if call.get("cancelled"):
@@ -1216,45 +1252,30 @@ class DoctorApp:
         if time.time() - self.last_call_sent < 3:
             self.flash("방금 호출했습니다.")
             return
-        db, room = self.db, self.room
-        prev = self.room_node.get("call") if isinstance(self.room_node, dict) else None
-        if self.recall_mode() and not force_new:
-            # 같은 환자 다시 부르기: 대기 변화 없음
-            self.last_call_sent = time.time()
-            val = {"id": new_id(), "time": now_hms(), "d": today(), "repeat": True}
-            if isinstance(prev, dict) and prev.get("ticket"):
-                val["ticket"] = prev["ticket"]
-            self.room_node = mirror_apply(self.room_node, "put", "/call", val)
-            self.render()
-            self.runner.submit(lambda: db.put("live/rooms/%s/call" % room, val),
-                               lambda _: self.flash("🔁 %s 다시 호출 보냄" % val["time"][:5]),
-                               lambda e: (play_alert(), self.flash("호출 실패: %s" % e)))
-            return
-        if self.waiting() <= 0:
+        again = self.recall_mode()
+        if not again and self.waiting() <= 0:
             self.flash("대기 환자가 없어 호출하지 않았습니다.")
             return
         self.last_call_sent = time.time()
+        db, room = self.db, self.room
+        prev = self.room_node.get("call") if isinstance(self.room_node, dict) else None
         val = {"id": new_id(), "time": now_hms(), "d": today()}
-        tid = tickets_today(self.room_node)[0]          # 가장 먼저 온 대기 1명이 들어감
-        val["ticket"] = {"id": tid, "v": self.room_node["queue"][tid]}
-        patch = {"live/rooms/%s/call" % room: val, "live/rooms/%s/queue/%s" % (room, tid): None}
-        self.room_node = mirror_apply(self.room_node, "put", "/queue/" + tid, None)
+        if again:
+            val["repeat"] = True
         self.room_node = mirror_apply(self.room_node, "put", "/call", val)
         self.render()
 
         def ok(_):
-            self.flash("📢 %s 호출 보냄 (대기 −1)" % val["time"][:5])
-            self.render()
+            self.flash(("🔁 %s 다시 호출 보냄" if again else "📢 %s 호출 보냄") % val["time"][:5])
 
         def fail(e):
-            self.room_node = mirror_apply(self.room_node, "put", "/queue/" + tid, val["ticket"]["v"])
             self.room_node = mirror_apply(self.room_node, "put", "/call", prev)
             self.last_call_sent = 0
             play_alert()
             self.flash("호출 실패: %s" % e)
             self.render()
 
-        self.runner.submit(lambda: db.patch("", patch), ok, fail)
+        self.runner.submit(lambda: db.put("live/rooms/%s/call" % room, val), ok, fail)
 
     def cancel_call(self):
         call = self.room_node.get("call") if isinstance(self.room_node, dict) else None
@@ -1263,14 +1284,15 @@ class DoctorApp:
         db, room = self.db, self.room
         patch = {"live/rooms/%s/call/cancelled" % room: True}
         tk_ = call.get("ticket")
-        if isinstance(tk_, dict) and isinstance(tk_.get("v"), dict) and tk_["v"].get("d") == today():
-            patch["live/rooms/%s/queue/%s" % (room, tk_["id"])] = tk_["v"]   # 대기 되돌림
+        if (call.get("acked") and isinstance(tk_, dict) and isinstance(tk_.get("v"), dict)
+                and tk_["v"].get("d") == today()):
+            patch["live/rooms/%s/queue/%s" % (room, tk_["id"])] = tk_["v"]   # 이미 들여보낸 경우 대기 되돌림
 
         def ok(_):
             self.room_node = mirror_apply(self.room_node, "put", "/call/cancelled", True)
             if len(patch) > 1:
                 self.room_node = mirror_apply(self.room_node, "put", "/queue/" + tk_["id"], tk_["v"])
-            self.flash("호출을 취소했습니다. (대기 +1)")
+            self.flash("호출을 취소했습니다." + (" (대기 +1)" if len(patch) > 1 else ""))
             self.render()
 
         self.runner.submit(lambda: db.patch("", patch), ok,
@@ -1383,15 +1405,8 @@ class DoctorApp:
                 "미전송 기록", "아직 전송 안 된 기록이 %d건 있습니다.\n종료해도 다음 실행 때 자동 전송됩니다. 종료할까요?"
                 % len(self.outbox), parent=self.root):
             return
-        if self.hotkeys:
-            self.hotkeys.stop()
-        for s in self.streams:
-            s.stop()
-        self.cfg["geometry"] = self.root.geometry()
-        save_json(CONFIG_FILE, self.cfg)
-        self.runner.close()
-        self.sender.close()
-        self.root.destroy()
+        save_json(OUTBOX_FILE, self.outbox)
+        quit_now(self.root, CONFIG_FILE, self.cfg)
 
 
 if __name__ == "__main__":
