@@ -18,6 +18,8 @@ from pathlib import Path
 from tkinter import ttk, messagebox, filedialog, simpledialog
 
 VERSION = "v13"
+BUILD_VERSION = "dev"   # GitHub에서 exe를 만들 때 자동으로 바뀜
+UPDATE_BASE = "https://raw.githubusercontent.com/qorwl503/clinic-counter/build/"
 NAMES = ["단순 문진", "내시경 동의서", "종검 설명", "폐암사후", "공검 내시경 설명", "예방접종 문진", "특검"]
 ROOMS = ("1", "2")
 FONT = "Malgun Gothic"
@@ -821,6 +823,59 @@ class TaskDetail:
                 self.lb.insert(tk.END, "오늘 기록 없음")
 
         runner.submit(fetch, show, lambda e: self.info.config(text="불러오기 실패: %s" % e))
+def auto_update(exe_name):
+    """켤 때 새 버전이 있으면 내려받아 바꾸고 다시 실행. 업데이트했으면 이 프로세스는 종료됨."""
+    if not getattr(sys, "frozen", False) or BUILD_VERSION == "dev":
+        return
+    exe = Path(sys.executable)
+    old = exe.with_name(exe.name + ".old")
+    try:
+        if old.exists():
+            old.unlink()
+    except OSError:
+        pass
+    try:
+        req = urllib.request.Request(UPDATE_BASE + "version.txt?t=%d" % time.time(),
+                                     headers={"Cache-Control": "no-cache"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            latest = r.read().decode("utf-8").strip()
+    except Exception:
+        return
+    if not latest or latest == BUILD_VERSION or len(latest) < 7:
+        return
+    win = tk.Tk()
+    win.title("업데이트")
+    win.attributes("-topmost", True)
+    win.geometry("320x90")
+    tk.Label(win, text="새 버전으로 업데이트 중입니다…\n잠시만 기다려 주세요.", font=(FONT, 11)).pack(expand=True)
+    win.update()
+    new = exe.with_name(exe.name + ".new")
+    try:
+        with urllib.request.urlopen(UPDATE_BASE + exe_name, timeout=90) as r:
+            data = r.read()
+        if len(data) < 1000000 or data[:2] != b"MZ":
+            raise ValueError("잘못된 파일")
+        new.write_bytes(data)
+        os.replace(str(exe), str(old))       # 실행 중인 exe도 이름 변경은 가능
+        os.replace(str(new), str(exe))
+    except Exception:
+        try:
+            if not exe.exists() and old.exists():
+                os.replace(str(old), str(exe))
+            if new.exists():
+                new.unlink()
+        except OSError:
+            pass
+        win.destroy()
+        return
+    win.destroy()
+    import subprocess
+    env = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1")
+    subprocess.Popen([str(exe)], env=env, close_fds=True,
+                     creationflags=0x00000008 | 0x00000200)   # DETACHED_PROCESS | NEW_PROCESS_GROUP
+    os._exit(0)
+
+
 # ===== 공통 모듈 끝 =====
 
 # ===== 데스크 프로그램 =====
@@ -835,7 +890,7 @@ class DeskApp:
             self.cfg.setdefault("name", "데스크")
             save_json(CONFIG_FILE, self.cfg)
         self.root = tk.Tk()
-        self.root.title("데스크 · 대기/호출 " + VERSION)
+        self.root.title("데스크 · 대기/호출 " + VERSION + " (" + BUILD_VERSION[:7] + ")")
         self.root.geometry(self.cfg.get("geometry") or "660x720+60+40")
         self.root.minsize(600, 560)
         self.root.configure(bg=BG)
@@ -1594,4 +1649,5 @@ class DeskApp:
 
 
 if __name__ == "__main__":
+    auto_update("desk.exe")
     DeskApp().root.mainloop()
