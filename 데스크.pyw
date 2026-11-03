@@ -367,7 +367,7 @@ SOUNDS = {
     "Windows 알림": "SystemAsterisk",
     "Windows 경고": "SystemHand",
 }
-DEFAULT_SOUNDS = {"1": "딩동", "2": "차임 (높은음)"}
+DEFAULT_SOUNDS = {"1": "딩동", "2": "차임 (높은음)", "staff": "삐삐삐"}
 
 
 def sound_file(name):
@@ -806,6 +806,9 @@ class DeskApp:
         self.last_call = {r: None for r in ROOMS}
         self.popups = {}
         self.unacked = set()
+        self.staff_popups = {}
+        self.staff_unacked = set()
+        self.last_staff = {r: None for r in ROOMS}
         self.notes = {r: "" for r in ROOMS}
         self.seen = {}
         self.assign_hold = 0
@@ -824,6 +827,7 @@ class DeskApp:
         self.streams = []
         self.live, self.events, self.online = {}, {}, False
         self.last_call = {r: None for r in ROOMS}
+        self.last_staff = {r: None for r in ROOMS}
         self.notes = {r: "" for r in ROOMS}
         key = self.cfg.get("key")
         if not key:
@@ -877,6 +881,7 @@ class DeskApp:
             pass
         if changed:
             self.check_calls()
+            self.check_staff()
             self.render()
         self.root.after(100, self.pump)
 
@@ -1016,6 +1021,8 @@ class DeskApp:
             for child in list(w["head"].winfo_children()) + list(w["tl"].winfo_children())[:1]:
                 child.config(bg=color)
             note = self.notes.get(r, "") if hasattr(self, "notes") else ""
+            if r in getattr(self, "staff_unacked", ()):
+                note = "🙋 직원 호출 중!" + ("\n" + note if note else "")
             w["call"].config(text=("🔔 호출됨! 환자 안내 후 '호출 확인'\n" if alert else "") + txt +
                              ("\n" + note if note else ""),
                              fg="#bd4429" if (alert or note.startswith("⚠")) else "#56647b")
@@ -1156,6 +1163,86 @@ class DeskApp:
             elif not oid or not on:
                 self.alert(r, call.get("time", ""), True, again)
 
+    # ---------- 직원 호출 ----------
+    def check_staff(self):
+        for r in ROOMS:
+            st = dig(self.live, "rooms", r, "staff")
+            if not isinstance(st, dict):
+                st = {}
+            sid = st.get("id")
+            key = (sid, bool(st.get("acked")))
+            if self.last_staff[r] is None:
+                self.last_staff[r] = key
+                continue
+            if not sid or key == self.last_staff[r]:
+                continue
+            prev_id = self.last_staff[r][0]
+            self.last_staff[r] = key
+            if st.get("acked"):
+                if r in self.staff_unacked:
+                    self.staff_ack(r, remote=True)
+                    self.notes[r] = "직원 호출: %s 가는 중" % st.get("acked")
+                    self.render()
+                continue
+            if sid == prev_id or st.get("d") != today():
+                continue
+            if call_age(st) > STALE_CALL_SEC:
+                self.notes[r] = "⚠ 놓친 직원 호출 %s" % st.get("time", "")[:5]
+                self.render()
+                continue
+            oid, _, on = self.owner(r)
+            if oid == self.cfg["id"] or not oid or not on:
+                self.staff_alert(r, st.get("time", ""), bool(st.get("repeat")))
+
+    def staff_alert(self, r, when, again):
+        self.staff_unacked.add(r)
+        snd = self.cfg.get("sound_staff") or DEFAULT_SOUNDS["staff"]
+        rep = int(self.cfg.get("repeat", 2))
+        play_sound(snd)
+        for k in range(1, rep):
+            self.root.after(1600 * k, lambda snd=snd: play_sound(snd))
+        old = self.staff_popups.pop(r, None)
+        if old is not None:
+            try:
+                old.destroy()
+            except tk.TclError:
+                pass
+        p = tk.Toplevel(self.root)
+        self.staff_popups[r] = p
+        p.title("진료실 %s 직원 호출" % r)
+        sw = p.winfo_screenwidth()
+        x = sw // 2 - 460 if r == "1" else sw // 2 + 20
+        p.geometry("440x190+%d+330" % max(0, x))
+        p.attributes("-topmost", True)
+        bg, fg = "#ece4ff", "#5b2fa8"
+        p.configure(bg=bg)
+        tk.Label(p, text="🙋 진료실 %s" % r, font=(FONT, 22, "bold"), bg=bg, fg=fg).pack(pady=(18, 0))
+        tk.Label(p, text="직원 호출%s — 진료실로 와주세요" % (" (다시)" if again else ""),
+                 font=(FONT, 15, "bold"), bg=bg, fg=fg).pack()
+        tk.Label(p, text="호출 %s" % when, font=(FONT, 10), bg=bg).pack(pady=(4, 6))
+        tk.Button(p, text="확인 (가는 중)", width=14, font=(FONT, 11, "bold"), bg="#d6c6ff",
+                  command=lambda: self.staff_ack(r)).pack()
+        p.protocol("WM_DELETE_WINDOW", lambda: self.staff_ack(r))
+        self.render()
+
+    def staff_ack(self, r, remote=False):
+        was = r in self.staff_unacked
+        self.staff_unacked.discard(r)
+        p = self.staff_popups.pop(r, None)
+        if p is not None:
+            try:
+                p.destroy()
+            except tk.TclError:
+                pass
+        st = dig(self.live, "rooms", r, "staff")
+        if was and not remote and self.db and isinstance(st, dict) and not st.get("acked"):
+            name = self.cfg.get("name", "데스크")
+            self.live = mirror_apply(self.live, "put", "/rooms/%s/staff/acked" % r, name)
+            self.last_staff[r] = (st.get("id"), True)
+            db = self.db
+            self.runner.submit(lambda: db.put("live/rooms/%s/staff/acked" % r, name), fail=self.fail)
+        self.render()
+
     def alert(self, r, when, unowned, again=False):
         self.unacked.add(r)
         snd = self.cfg.get("sound" + r) or DEFAULT_SOUNDS[r]
@@ -1293,6 +1380,12 @@ class DeskApp:
             svars[r] = v
             ttk.Combobox(row2, textvariable=v, values=list(SOUNDS), state="readonly", width=18).pack(side="left")
             tk.Button(row2, text="▶ 미리 듣기", command=lambda v=v: play_sound(v.get())).pack(side="left", padx=6)
+        row_s = tk.Frame(win)
+        row_s.pack(pady=2, **pad)
+        tk.Label(row_s, text="직원 호출", width=8, anchor="w").pack(side="left")
+        sv_staff = tk.StringVar(master=win, value=self.cfg.get("sound_staff") or DEFAULT_SOUNDS["staff"])
+        ttk.Combobox(row_s, textvariable=sv_staff, values=list(SOUNDS), state="readonly", width=18).pack(side="left")
+        tk.Button(row_s, text="▶ 미리 듣기", command=lambda: play_sound(sv_staff.get())).pack(side="left", padx=6)
         row3 = tk.Frame(win)
         row3.pack(pady=2, **pad)
         tk.Label(row3, text="반복 횟수", width=8, anchor="w").pack(side="left")
@@ -1312,6 +1405,7 @@ class DeskApp:
             for r, v in svars.items():
                 self.cfg["sound" + r] = v.get()
             self.cfg["repeat"] = int(rep.get())
+            self.cfg["sound_staff"] = sv_staff.get()
             self.cfg["key"] = k
             save_json(CONFIG_FILE, self.cfg)
             win.destroy()

@@ -367,7 +367,7 @@ SOUNDS = {
     "Windows 알림": "SystemAsterisk",
     "Windows 경고": "SystemHand",
 }
-DEFAULT_SOUNDS = {"1": "딩동", "2": "차임 (높은음)"}
+DEFAULT_SOUNDS = {"1": "딩동", "2": "차임 (높은음)", "staff": "삐삐삐"}
 
 
 def sound_file(name):
@@ -963,6 +963,13 @@ class DoctorApp:
         self.w["callinfo"].pack(side="left")
         self.w["cancel"] = tk.Button(crow, text="호출 취소", relief="flat", bg="#f3e3e3",
                                      font=(FONT, 9), command=self.cancel_call)
+        srow = tk.Frame(o, bg=BG)
+        srow.pack(fill="x", pady=(4, 0))
+        self.w["staff"] = tk.Button(srow, text="🙋 직원 호출", font=(FONT, 10, "bold"), bg="#e6dcff",
+                                    fg="#4a2690", relief="flat", command=self.staff_call)
+        self.w["staff"].pack(side="left", ipadx=8, ipady=2)
+        self.w["staffinfo"] = tk.Label(srow, bg=BG, fg="#5b2fa8", font=(FONT, 9), anchor="w")
+        self.w["staffinfo"].pack(side="left", padx=8)
         self.w["recv"] = tk.Label(o, bg=BG, font=(FONT, 9), anchor="w")
         self.w["recv"].pack(fill="x", pady=(0, 4))
         mrow = tk.Frame(o, bg=BG)
@@ -1050,6 +1057,17 @@ class DoctorApp:
         else:
             self.w["callinfo"].config(text="오늘 호출 없음")
             self.w["cancel"].pack_forget()
+        st = self.room_node.get("staff") if isinstance(self.room_node, dict) else None
+        if isinstance(st, dict) and st.get("d") == today() and call_age(st) < 1800:
+            if st.get("acked"):
+                self.w["staffinfo"].config(text="✔ %s 가는 중 (%s 호출)" % (st.get("acked"), st.get("time", "")[:5]))
+                self.w["staff"].config(text="🙋 직원 호출")
+            else:
+                self.w["staffinfo"].config(text="%s 호출 · 데스크 확인 전" % st.get("time", "")[:5])
+                self.w["staff"].config(text="🙋 직원 다시 호출")
+        else:
+            self.w["staffinfo"].config(text="")
+            self.w["staff"].config(text="🙋 직원 호출")
         # 호출 받을 데스크 표시
         if self.db is None or not self.online:
             self.w["recv"].config(text="", fg="#56647b")
@@ -1276,6 +1294,27 @@ class DoctorApp:
             self.render()
 
         self.runner.submit(lambda: db.put("live/rooms/%s/call" % room, val), ok, fail)
+
+    def staff_call(self):
+        if self.db is None or not self.online:
+            play_alert()
+            self.flash("연결이 끊겨 직원을 호출할 수 없습니다.")
+            return
+        if time.time() - getattr(self, "last_staff_sent", 0) < 3:
+            self.flash("방금 직원을 호출했습니다.")
+            return
+        self.last_staff_sent = time.time()
+        prev = self.room_node.get("staff") if isinstance(self.room_node, dict) else None
+        again = isinstance(prev, dict) and not prev.get("acked") and call_age(prev) < 600
+        val = {"id": new_id(), "time": now_hms(), "d": today()}
+        if again:
+            val["repeat"] = True
+        self.room_node = mirror_apply(self.room_node, "put", "/staff", val)
+        self.render()
+        db, room = self.db, self.room
+        self.runner.submit(lambda: db.put("live/rooms/%s/staff" % room, val),
+                           lambda _: self.flash("🙋 %s 직원 호출 보냄" % val["time"][:5]),
+                           lambda e: (play_alert(), self.flash("직원 호출 실패: %s" % e)))
 
     def cancel_call(self):
         call = self.room_node.get("call") if isinstance(self.room_node, dict) else None
