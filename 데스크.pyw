@@ -110,7 +110,7 @@ class FirebaseDB:
             raise ConnectionError("서버 오류 %s" % e.code)
         except (urllib.error.URLError, OSError) as e:
             raise ConnectionError("인터넷 연결 실패: %s" % getattr(e, "reason", e))
-        return json.loads(raw.decode("utf-8")) if raw else None
+        return normalize(json.loads(raw.decode("utf-8"))) if raw else None
 
     def get(self, path, params=None):
         return self._req("GET", path, params=params, timeout=15)
@@ -162,7 +162,7 @@ class Stream(threading.Thread):
                         data = line[5:].strip()
                         if event in ("put", "patch"):
                             msg = json.loads(data)
-                            self.out.put((self.tag, event, msg.get("path", "/"), msg.get("data")))
+                            self.out.put((self.tag, event, msg.get("path", "/"), normalize(msg.get("data"))))
                         elif event in ("cancel", "auth_revoked"):
                             self.out.put((self.tag, "error", "접근 거부 (DB 규칙 확인)", None))
                             raise ConnectionError("cancel")
@@ -182,15 +182,27 @@ class Stream(threading.Thread):
                     pass
 
 
+def normalize(v):
+    """Firebase는 키가 1,2처럼 숫자면 배열로 돌려줌 -> 항상 dict로 변환"""
+    if isinstance(v, list):
+        return {str(i): normalize(x) for i, x in enumerate(v) if x is not None}
+    if isinstance(v, dict):
+        return {k: normalize(x) for k, x in v.items()}
+    return v
+
+
 def mirror_apply(root, event, path, data):
     """로컬 사본(dict)에 put/patch 반영. 새 root 반환."""
     keys = [k for k in path.strip("/").split("/") if k]
     if event == "put":
         if not keys:
+            data = normalize(data)
             return data if isinstance(data, dict) else {}
         node = root if isinstance(root, dict) else {}
         root = node
         for k in keys[:-1]:
+            if isinstance(node.get(k), list):
+                node[k] = normalize(node[k])
             if not isinstance(node.get(k), dict):
                 node[k] = {}
             node = node[k]
@@ -817,7 +829,7 @@ class DeskApp:
         tk.Label(mine, text="내가 받을 호출:", bg="#fff8e6", font=(FONT, 10, "bold")).pack(side="left")
         self.mode = tk.StringVar(master=self.root, value="")
         for value, label in (("1", "진료실 1"), ("2", "진료실 2"), ("both", "전체 담당")):
-            tk.Radiobutton(mine, text=label, variable=self.mode, value=value, bg="#fff8e6",
+            tk.Radiobutton(mine, text=label, variable=self.mode, value=value, bg="#fff8e6", tristatevalue="~",
                            font=(FONT, 10), command=self.set_mode).pack(side="left", padx=4)
 
         cols = tk.Frame(f, bg=BG)
