@@ -1152,7 +1152,7 @@ class DeskApp:
                 more = " · ".join("%d분" % m for m in mins[1:4]) + (" …" if len(mins) > 4 else "")
                 w["waitinfo"].config(
                     text="⏱ 첫 대기 %d분째%s" % (top, ("   (다음: %s)" % more) if more else ""),
-                    fg="#c0392b" if top >= 30 else ("#c77923" if top >= 15 else "#56647b"))
+                    fg="#c0392b" if top >= 10 else ("#c77923" if top >= 5 else "#56647b"))
             else:
                 w["waitinfo"].config(text="", fg="#56647b")
             stale = not self.online
