@@ -371,6 +371,19 @@ SOUNDS = {
     "딩동댕": [(784, 0.22), (988, 0.22), (1175, 0.45)],
     "번호표 띵동": [(1175, 0.35, "bell"), (932, 0.7, "bell")],
     "번호표 띵동 (낮게)": [(784, 0.38, "bell"), (622, 0.75, "bell")],
+    # --- 2음 추가 ---
+    "동딩 (올라가는)": [(784, 0.25), (988, 0.45)],
+    "동딩 (올라가는·낮게)": [(523, 0.28), (659, 0.5)],
+    "딩동 (넓은 간격)": [(1047, 0.25), (698, 0.5)],
+    "딩동 (옥타브)": [(1047, 0.25), (523, 0.55)],
+    "띵동 종소리 (높게)": [(1568, 0.3, "bell"), (1245, 0.65, "bell")],
+    "띵동 종소리 (아주 낮게)": [(587, 0.4, "bell"), (466, 0.8, "bell")],
+    "통통 마림바": [(784, 0.22, "marimba"), (587, 0.4, "marimba")],
+    "통통 마림바 (낮게)": [(523, 0.24, "marimba"), (392, 0.45, "marimba")],
+    "또롱 (올라가는 마림바)": [(659, 0.18, "marimba"), (988, 0.4, "marimba")],
+    "띠링 (짧고 높게)": [(1568, 0.12, "marimba"), (2093, 0.3, "marimba")],
+    "딩-동 (길게 울림)": [(880, 0.6, "bell"), (0, 0.05), (659, 1.1, "bell")],
+    "딩동 (톡톡 짧게)": [(1175, 0.1), (0, 0.04), (880, 0.16)],
 }
 DEFAULT_SOUNDS = {"1": "딩동", "2": "딩동 (낮게)", "staff1": "딩동 두 번", "staff2": "딩동 두 번 (낮게)",
                   "staff": "딩동 두 번", "msg": "무음"}
@@ -860,6 +873,7 @@ class DeskApp:
             s.stop()
         self.streams = []
         self.live, self.events, self.online = {}, {}, False
+        self.claimed_on_start = False
         self.last_call = {r: None for r in ROOMS}
         self.last_staff = {r: None for r in ROOMS}
         self.notes = {r: "" for r in ROOMS}
@@ -908,6 +922,9 @@ class DeskApp:
                     self.legacy[r] = legacy_apply(self.legacy.get(r), ev, path, data)
                 elif tag == "live":
                     self.live = mirror_apply(self.live, ev, path, data)
+                    if not self.claimed_on_start and ev == "put" and path == "/":
+                        self.claimed_on_start = True
+                        self.root.after(500, self.claim_free_rooms)
                 else:
                     self.events = mirror_apply(self.events, ev, path, data)
                 changed = True
@@ -936,21 +953,30 @@ class DeskApp:
         top.pack(fill="x")
         self.w["title"] = tk.Label(top, text="데스크", bg=BG, font=(FONT, 15, "bold"), fg="#18263b")
         self.w["title"].pack(side="left")
-        tk.Button(top, text="⚙ 설정", relief="flat", bg="#e8eef9", command=self.settings).pack(side="right")
-        tk.Button(top, text="📊 월별 통계", relief="flat", bg="#e8eef9", command=self.stats).pack(side="right", padx=6)
+        tk.Button(top, text="⚙", relief="flat", bg="#e8eef9", command=self.settings).pack(side="right")
+        tk.Button(top, text="📊 통계", relief="flat", bg="#e8eef9", command=self.stats).pack(side="right", padx=6)
         self.w["status"] = tk.Label(f, bg=BG, anchor="w", font=(FONT, 9), padx=4)
         self.w["status"].pack(fill="x", pady=(2, 6))
 
         mine = tk.Frame(f, bg="#fff8e6", padx=10, pady=7)
         mine.pack(fill="x", pady=(0, 6))
-        tk.Label(mine, text="내가 받을 호출:", bg="#fff8e6", font=(FONT, 10, "bold")).pack(side="left")
-        self.mode = tk.StringVar(master=self.root, value="")
-        for value, label in (("1", "진료실 1"), ("2", "진료실 2"), ("both", "전체 담당")):
-            tk.Radiobutton(mine, text=label, variable=self.mode, value=value, bg="#fff8e6", tristatevalue="~",
-                           font=(FONT, 10), command=self.set_mode).pack(side="left", padx=4)
+        tk.Label(mine, text="내 담당:", bg="#fff8e6", font=(FONT, 10, "bold")).pack(side="left")
+        saved = self.cfg.get("my_rooms")
+        if saved is None:   # 이전 버전 설정 이어받기
+            v = self.cfg.get("view", "")
+            saved = list(ROOMS) if v == "both" else ([v] if v in ROOMS else [])
+        self.sel = {}
+        for r in ROOMS:
+            var = tk.BooleanVar(master=self.root, value=r in saved)
+            self.sel[r] = var
+            tk.Checkbutton(mine, text="진료실 " + r, variable=var, bg="#fff8e6", font=(FONT, 10, "bold"),
+                           command=self.set_mode).pack(side="left", padx=4)
+        tk.Label(mine, text="(둘 다 체크 = 전체)", bg="#fff8e6", fg="#7a6a3a", font=(FONT, 8)).pack(side="left")
 
         cols = tk.Frame(f, bg=BG)
         cols.pack(fill="both", expand=True)
+        self.cols = cols
+        self.layout = None
         for ci, r in enumerate(ROOMS):
             cols.grid_columnconfigure(ci, weight=1, uniform="room")
             box = tk.Frame(cols, bg="#eaf2fc", padx=10, pady=8)
@@ -962,6 +988,9 @@ class DeskApp:
             own.pack(side="right")
             big = tk.Label(box, bg="#eaf2fc", fg="#1d62b2", font=(FONT, 22, "bold"), anchor="w")
             big.pack(fill="x", pady=(2, 0))
+            waitinfo = tk.Label(box, bg="#eaf2fc", fg="#56647b", font=(FONT, 10, "bold"), anchor="w",
+                                justify="left")
+            waitinfo.pack(fill="x")
             done = tk.Label(box, bg="#eaf2fc", fg="#24824d", font=(FONT, 12, "bold"), anchor="w")
             done.pack(fill="x")
             call = tk.Label(box, bg="#eaf2fc", fg="#56647b", font=(FONT, 9), anchor="w",
@@ -1002,7 +1031,7 @@ class DeskApp:
                 rows.append(lab)
             self.w[r] = {"box": box, "own": own, "big": big, "done": done, "call": call,
                          "ack": ack, "head": head, "btns": btns, "tl": tl, "rows": rows,
-                         "mb": mb, "mbr": mbr, "msginfo": msginfo}
+                         "mb": mb, "mbr": mbr, "msginfo": msginfo, "waitinfo": waitinfo}
 
         bottom = tk.Frame(f, bg=BG)
         bottom.pack(fill="x", side="bottom")
@@ -1022,16 +1051,31 @@ class DeskApp:
             return True
         return desk_alive(self.live, desk_id, self.seen)
 
-    def owner(self, room):
-        """(담당 데스크 id, 이름, 온라인 여부)"""
-        oid = dig(self.live, "assign", room) or ""
-        if not oid:
-            return "", "", False
-        name = dig(self.live, "desks", oid, "name") or "다른 데스크"
-        return oid, name, self.desk_online(oid)
+    def my_rooms(self):
+        return [r for r in ROOMS if self.sel[r].get()]
+
+    def owners(self, room):
+        """이 진료실을 고른 켜진 데스크들 [(id, 이름)] — 나 포함"""
+        out = []
+        for did, info in (dig(self.live, "desks") or {}).items():
+            if did == self.cfg["id"]:
+                continue
+            if isinstance(info, dict) and (info.get("rooms") or {}).get(room) and self.desk_online(did):
+                out.append((did, info.get("name") or "다른 데스크"))
+        if room in self.my_rooms():
+            out.insert(0, (self.cfg["id"], "나"))
+        return out
+
+    def should_alert(self, room):
+        """(알림 여부, 담당 없음 여부): 내가 고른 진료실이면 알림, 아무도 안 골랐으면 모두 알림"""
+        if room in self.my_rooms():
+            return True, False
+        if not self.owners(room):
+            return True, True
+        return False, False
 
     def render(self):
-        self.w["title"].config(text="%s · 대기/호출" % self.cfg.get("name", "데스크"))
+        self.w["title"].config(text=self.cfg.get("name", "데스크"))
         for r in ROOMS:
             w = self.w[r]
             node = dig(self.live, "rooms", r) or {}
@@ -1044,6 +1088,18 @@ class DeskApp:
             else:
                 w["big"].config(text="대기 %d명" % waiting)
             w["done"].config(text="오늘 진료 완료 %d명" % patients)
+            # 대기 시간: 먼저 온 순서대로 몇 분째인지
+            q = (node.get("queue") or {}) if isinstance(node.get("queue"), dict) else {}
+            mins = [self.minutes_since(q[t].get("t", "")) for t in tickets_today(node)]
+            mins = [m for m in mins if m is not None]
+            if mins:
+                top = mins[0]
+                more = " · ".join("%d분" % m for m in mins[1:4]) + (" …" if len(mins) > 4 else "")
+                w["waitinfo"].config(
+                    text="⏱ 첫 대기 %d분째%s" % (top, ("   (다음: %s)" % more) if more else ""),
+                    fg="#c0392b" if top >= 30 else ("#c77923" if top >= 15 else "#56647b"))
+            else:
+                w["waitinfo"].config(text="", fg="#56647b")
             stale = not self.online
             w["big"].config(fg="#9aa6b8" if stale else "#1d62b2")
             w["done"].config(fg="#9aa6b8" if stale else "#24824d")
@@ -1056,11 +1112,10 @@ class DeskApp:
                 txt = "마지막 호출 %s" % call.get("time", "")[:5] + (" (%d분 전)" % mins if mins is not None else "")
             else:
                 txt = "오늘 호출 없음"
-            oid, oname, on = self.owner(r)
-            if oid == self.cfg["id"]:
-                w["own"].config(text="담당: 나", fg="#21804c")
-            elif oid and on:
-                w["own"].config(text="담당: " + oname, fg="#1d62b2")
+            ows = self.owners(r)
+            if ows:
+                w["own"].config(text="담당: " + ", ".join(n for _, n in ows),
+                                fg="#21804c" if ows[0][1] == "나" else "#1d62b2")
             else:
                 w["own"].config(text="담당 없음 → 모든 데스크에 알림", fg="#bd4429")
             alert = r in self.unacked
@@ -1073,7 +1128,7 @@ class DeskApp:
                     fg="#21804c" if m.get("acked") else "#8a6d1d")
             else:
                 w["msginfo"].config(text="")
-            for key in ("box", "head", "btns", "tl", "own", "big", "done", "call", "mb", "mbr", "msginfo"):
+            for key in ("box", "head", "btns", "tl", "own", "big", "done", "call", "mb", "mbr", "msginfo", "waitinfo"):
                 w[key].config(bg=color)
             for child in list(w["head"].winfo_children()) + list(w["tl"].winfo_children())[:1]:
                 child.config(bg=color)
@@ -1088,10 +1143,37 @@ class DeskApp:
             else:
                 w["ack"].pack_forget()
 
-        if time.time() > self.assign_hold:
-            mine = [r for r in ROOMS if dig(self.live, "assign", r) == self.cfg["id"]]
-            self.mode.set("both" if len(mine) == 2 else (mine[0] if mine else ""))
-        self.w["foot"].config(text="담당이 없으면 모든 데스크에 알림이 갑니다.")
+        self.apply_layout()
+        self.w["foot"].config(text="담당 없는 진료실은 모든 데스크에 알림")
+
+    def apply_layout(self):
+        """진료실 1만 담당 → 진료실 1만, 진료실 2만 → 진료실 2만, 전체/미선택 → 둘 다 표시"""
+        show = tuple(self.my_rooms()) or ROOMS
+        if show == self.layout:
+            return
+        self.layout = show
+        for ci, r in enumerate(ROOMS):
+            box = self.w[r]["box"]
+            if r in show:
+                pos = show.index(r)
+                padx = (0, 0) if len(show) == 1 else ((0, 6) if pos == 0 else (6, 0))
+                box.grid(row=0, column=pos, sticky="nsew", padx=padx)
+            else:
+                box.grid_remove()
+        for ci in range(len(ROOMS)):
+            self.cols.grid_columnconfigure(ci, weight=1 if ci < len(show) else 0,
+                                           uniform="room" if ci < len(show) else "")
+        # 창 너비 맞추기 (높이·위치는 그대로)
+        try:
+            self.root.update_idletasks()
+            h = self.root.winfo_height()
+            x, y = self.root.winfo_x(), self.root.winfo_y()
+            width = 390 if len(show) == 1 else 660
+            self.root.minsize(370 if len(show) == 1 else 600, 560)
+            if h > 1:
+                self.root.geometry("%dx%d+%d+%d" % (width, h, x, y))
+        except tk.TclError:
+            pass
 
     @staticmethod
     def minutes_since(hms):
@@ -1108,11 +1190,12 @@ class DeskApp:
             self.start_streams()
             self.runner.submit(self.cleanup_old_tickets)
         self.render()
-        self.root.after(15000 if not self.unacked else 5000, self.tick)
+        self.root.after(10000 if not self.unacked else 5000, self.tick)
 
     def heartbeat(self):
         if self.db:
-            body = {"name": self.cfg.get("name", "데스크"), "seen": {".sv": "timestamp"}}
+            body = {"name": self.cfg.get("name", "데스크"), "seen": {".sv": "timestamp"},
+                    "rooms": {r: True for r in self.my_rooms()} or None}
             db, did = self.db, self.cfg["id"]
             self.runner.submit(lambda: db.put("live/desks/" + did, body))
         self.root.after(5000, self.heartbeat)
@@ -1160,24 +1243,27 @@ class DeskApp:
         db = self.db
         self.runner.submit(lambda: db.delete("live/rooms/%s/queue/%s" % (r, tid)), fail=self.fail)
 
+    def claim_free_rooms(self):
+        """(이전 방식 호환용 — 담당은 각 데스크가 독립적으로 고름)"""
+        return
+
     def set_mode(self):
-        """담당 선택: 고른 진료실은 내가 가져오고, 안 고른 진료실은 내 담당이면 해제"""
-        if not self.need_db():
-            self.mode.set("")
-            return
-        self.assign_hold = time.time() + 4
-        want = ROOMS if self.mode.get() == "both" else (self.mode.get(),)
-        patch = {}
-        for r in ROOMS:
-            if r in want:
-                patch["live/assign/" + r] = self.cfg["id"]
-            elif dig(self.live, "assign", r) == self.cfg["id"]:
-                patch["live/assign/" + r] = None
-        for k, v in patch.items():
-            self.live = mirror_apply(self.live, "put", k[4:], v)
+        """담당 선택: 각 데스크가 독립적으로 고르고, 여러 데스크가 같은 진료실을 골라도 모두 알림 받음."""
+        self.cfg["my_rooms"] = self.my_rooms()
+        save_json(CONFIG_FILE, self.cfg)
         self.render()
-        db = self.db
-        self.runner.submit(lambda: db.patch("", patch), fail=self.fail)
+        if self.db:
+            did = self.cfg["id"]
+            rooms = {r: True for r in self.my_rooms()} or None
+            self.live = mirror_apply(self.live, "put", "/desks/%s/rooms" % did, rooms)
+            db = self.db
+            self.runner.submit(lambda: db.put("live/desks/%s/rooms" % did, rooms), fail=self.fail)
+
+    def select(self, rooms):
+        """(시험용) 담당 진료실 지정"""
+        for r in ROOMS:
+            self.sel[r].set(r in rooms)
+        self.set_mode()
 
     # ---------- 호출 알림 ----------
     def check_calls(self):
@@ -1213,12 +1299,10 @@ class DeskApp:
                 self.render()
                 continue
             self.notes[r] = ""
-            oid, _, on = self.owner(r)
             again = bool(call.get("repeat"))
-            if oid == self.cfg["id"]:
-                self.alert(r, call.get("time", ""), False, again)
-            elif not oid or not on:
-                self.alert(r, call.get("time", ""), True, again)
+            go, unowned = self.should_alert(r)
+            if go:
+                self.alert(r, call.get("time", ""), unowned, again)
 
     # ---------- 데스크 → 진료실 알림 ----------
     def send_msg(self, r, label):
@@ -1267,8 +1351,7 @@ class DeskApp:
                 self.notes[r] = "⚠ 놓친 직원 호출 %s" % st.get("time", "")[:5]
                 self.render()
                 continue
-            oid, _, on = self.owner(r)
-            if oid == self.cfg["id"] or not oid or not on:
+            if self.should_alert(r)[0]:
                 self.staff_alert(r, st.get("time", ""), bool(st.get("repeat")))
 
     def staff_alert(self, r, when, again):
@@ -1501,9 +1584,6 @@ class DeskApp:
         if self.db:
             db, did = self.db, self.cfg["id"]
             patch = {"live/desks/" + did: None}
-            for r in ROOMS:
-                if dig(self.live, "assign", r) == did:
-                    patch["live/assign/" + r] = None
 
             def job():
                 try:
