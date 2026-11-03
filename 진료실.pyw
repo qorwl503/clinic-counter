@@ -929,7 +929,7 @@ class DoctorApp:
         self.w["undo"] = tk.Button(mrow, text="↶ 되돌리기", relief="flat", bg="#ffe9b8",
                                    font=(FONT, 10, "bold"), command=self.undo_last)
 
-        tk.Label(o, text="업무 + 를 누르면 진료 완료(대기 −1)로 함께 기록됩니다. − 는 되돌리기.",
+        tk.Label(o, text="호출하면 대기 −1 (환자 입실) · 업무 + 는 진료 완료로 기록 · − 는 되돌리기",
                  bg=BG, fg="#65738a", font=(FONT, 8), anchor="w").pack(fill="x", pady=(0, 3))
         self.w["rows"] = []
         for i, name in enumerate(NAMES):
@@ -1104,13 +1104,6 @@ class DoctorApp:
         eid, day = new_id(), today()
         ev = {"room": self.room, "task": task, "time": now_hms()}
         patch, mirror = {}, []
-        claimed = {k.rsplit("/", 1)[1] for op in self.outbox for k in op["patch"] if "/queue/" in k}
-        ids = [t for t in tickets_today(self.room_node) if t not in claimed]
-        if ids:
-            tid = ids[0]
-            ev["ticket"] = {"id": tid, "v": self.room_node["queue"][tid]}
-            patch["live/rooms/%s/queue/%s" % (self.room, tid)] = None
-            mirror.append(("q:" + tid, None))
         patch["days/%s/events/%s" % (day, eid)] = ev
         if day == self.events_day:
             mirror.append(("/events/" + eid, ev))
@@ -1211,30 +1204,44 @@ class DoctorApp:
         self.last_call_sent = time.time()
         val = {"id": new_id(), "time": now_hms(), "d": today()}
         db, room = self.db, self.room
+        tid = tickets_today(self.room_node)[0]          # 가장 먼저 온 대기 1명이 들어감
+        val["ticket"] = {"id": tid, "v": self.room_node["queue"][tid]}
+        patch = {"live/rooms/%s/call" % room: val, "live/rooms/%s/queue/%s" % (room, tid): None}
+        self.room_node = mirror_apply(self.room_node, "put", "/queue/" + tid, None)
+        self.render()
 
         def ok(_):
             self.room_node = mirror_apply(self.room_node, "put", "/call", val)
-            self.flash("📢 %s 호출 보냄" % val["time"][:5])
+            self.flash("📢 %s 호출 보냄 (대기 −1)" % val["time"][:5])
             self.render()
 
         def fail(e):
+            self.room_node = mirror_apply(self.room_node, "put", "/queue/" + tid, val["ticket"]["v"])
+            self.last_call_sent = 0
             play_alert()
             self.flash("호출 실패: %s" % e)
+            self.render()
 
-        self.runner.submit(lambda: db.put("live/rooms/%s/call" % room, val), ok, fail)
+        self.runner.submit(lambda: db.patch("", patch), ok, fail)
 
     def cancel_call(self):
         call = self.room_node.get("call") if isinstance(self.room_node, dict) else None
         if not isinstance(call, dict) or call.get("cancelled") or self.db is None:
             return
         db, room = self.db, self.room
+        patch = {"live/rooms/%s/call/cancelled" % room: True}
+        tk_ = call.get("ticket")
+        if isinstance(tk_, dict) and isinstance(tk_.get("v"), dict) and tk_["v"].get("d") == today():
+            patch["live/rooms/%s/queue/%s" % (room, tk_["id"])] = tk_["v"]   # 대기 되돌림
 
         def ok(_):
             self.room_node = mirror_apply(self.room_node, "put", "/call/cancelled", True)
-            self.flash("호출을 취소했습니다.")
+            if len(patch) > 1:
+                self.room_node = mirror_apply(self.room_node, "put", "/queue/" + tk_["id"], tk_["v"])
+            self.flash("호출을 취소했습니다. (대기 +1)")
             self.render()
 
-        self.runner.submit(lambda: db.put("live/rooms/%s/call/cancelled" % room, True), ok,
+        self.runner.submit(lambda: db.patch("", patch), ok,
                            lambda e: self.flash("취소 실패: %s" % e))
 
     # ---------- 단축키 ----------
