@@ -357,6 +357,7 @@ class Runner:
 
 # ---------- 알림음 ----------
 SOUNDS = {
+    "무음": [],
     "딩동": [(988, 0.25), (784, 0.45)],
     "딩동 (높게)": [(1319, 0.25), (1047, 0.45)],
     "딩동 (낮게)": [(659, 0.28), (523, 0.5)],
@@ -376,7 +377,8 @@ SOUNDS = {
     "Windows 알림": "SystemAsterisk",
     "Windows 경고": "SystemHand",
 }
-DEFAULT_SOUNDS = {"1": "딩동", "2": "딩동 (낮게)", "staff": "삐삐삐", "msg": "부드러운 종"}
+DEFAULT_SOUNDS = {"1": "딩동", "2": "딩동 (낮게)", "staff1": "딩동 두 번", "staff2": "딩동 두 번 (낮게)",
+                  "staff": "딩동 두 번", "msg": "무음"}
 DEFAULT_MSG_BUTTONS = ["대기", "폐암사후", "종검결과"]
 
 
@@ -394,7 +396,7 @@ def sound_file(name):
     """음 목록을 wav 파일로 만들어 경로 반환 (한 번만 생성)"""
     import wave, math, struct
     notes = SOUNDS.get(name)
-    if not isinstance(notes, list):
+    if not isinstance(notes, list) or not notes:
         return None
     import hashlib
     path = DATA_DIR / "sounds" / ("%s.wav" % hashlib.md5(name.encode("utf-8")).hexdigest()[:10])
@@ -421,6 +423,8 @@ def sound_file(name):
 
 
 def play_sound(name):
+    if name == "무음":
+        return
     if sys.platform == "win32":
         try:
             import winsound
@@ -1134,7 +1138,7 @@ class DoctorApp:
         st = self.room_node.get("staff") if isinstance(self.room_node, dict) else None
         if isinstance(st, dict) and st.get("d") == today() and call_age(st) < 1800:
             if st.get("acked"):
-                self.w["staffinfo"].config(text="✔ %s 가는 중 (%s 호출)" % (st.get("acked"), st.get("time", "")[:5]))
+                self.w["staffinfo"].config(text="✔ %s 확인 (%s 호출)" % (st.get("acked"), st.get("time", "")[:5]))
                 self.w["staff"].config(text="🙋 직원 호출")
             else:
                 self.w["staffinfo"].config(text="%s 호출 · 데스크 확인 전" % st.get("time", "")[:5])

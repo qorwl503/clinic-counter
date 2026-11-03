@@ -357,6 +357,7 @@ class Runner:
 
 # ---------- 알림음 ----------
 SOUNDS = {
+    "무음": [],
     "딩동": [(988, 0.25), (784, 0.45)],
     "딩동 (높게)": [(1319, 0.25), (1047, 0.45)],
     "딩동 (낮게)": [(659, 0.28), (523, 0.5)],
@@ -376,7 +377,8 @@ SOUNDS = {
     "Windows 알림": "SystemAsterisk",
     "Windows 경고": "SystemHand",
 }
-DEFAULT_SOUNDS = {"1": "딩동", "2": "딩동 (낮게)", "staff": "삐삐삐", "msg": "부드러운 종"}
+DEFAULT_SOUNDS = {"1": "딩동", "2": "딩동 (낮게)", "staff1": "딩동 두 번", "staff2": "딩동 두 번 (낮게)",
+                  "staff": "딩동 두 번", "msg": "무음"}
 DEFAULT_MSG_BUTTONS = ["대기", "폐암사후", "종검결과"]
 
 
@@ -394,7 +396,7 @@ def sound_file(name):
     """음 목록을 wav 파일로 만들어 경로 반환 (한 번만 생성)"""
     import wave, math, struct
     notes = SOUNDS.get(name)
-    if not isinstance(notes, list):
+    if not isinstance(notes, list) or not notes:
         return None
     import hashlib
     path = DATA_DIR / "sounds" / ("%s.wav" % hashlib.md5(name.encode("utf-8")).hexdigest()[:10])
@@ -421,6 +423,8 @@ def sound_file(name):
 
 
 def play_sound(name):
+    if name == "무음":
+        return
     if sys.platform == "win32":
         try:
             import winsound
@@ -1241,7 +1245,7 @@ class DeskApp:
             if st.get("acked"):
                 if r in self.staff_unacked:
                     self.staff_ack(r, remote=True)
-                    self.notes[r] = "직원 호출: %s 가는 중" % st.get("acked")
+                    self.notes[r] = "직원 호출: %s 확인" % st.get("acked")
                     self.render()
                 continue
             if sid == prev_id or st.get("d") != today():
@@ -1256,7 +1260,7 @@ class DeskApp:
 
     def staff_alert(self, r, when, again):
         self.staff_unacked.add(r)
-        snd = self.cfg.get("sound_staff") or DEFAULT_SOUNDS["staff"]
+        snd = self.cfg.get("sound_staff" + r) or DEFAULT_SOUNDS["staff" + r]
         rep = int(self.cfg.get("repeat", 2))
         play_sound(snd)
         for k in range(1, rep):
@@ -1280,7 +1284,7 @@ class DeskApp:
         tk.Label(p, text="직원 호출%s — 진료실로 와주세요" % (" (다시)" if again else ""),
                  font=(FONT, 15, "bold"), bg=bg, fg=fg).pack()
         tk.Label(p, text="호출 %s" % when, font=(FONT, 10), bg=bg).pack(pady=(4, 6))
-        tk.Button(p, text="확인 (가는 중)", width=14, font=(FONT, 11, "bold"), bg="#d6c6ff",
+        tk.Button(p, text="확인", width=14, font=(FONT, 11, "bold"), bg="#d6c6ff",
                   command=lambda: self.staff_ack(r)).pack()
         p.protocol("WM_DELETE_WINDOW", lambda: self.staff_ack(r))
         self.render()
@@ -1430,22 +1434,17 @@ class DeskApp:
         tk.Label(win, text="처음 한 번만 '새 연결 키 만들기'를 하고,\n나머지 PC에는 그 키를 복사해 붙여넣으세요.",
                  fg="#65738a", font=(FONT, 8), justify="left").pack(**pad)
 
-        tk.Label(win, text="호출 알림음 (진료실마다 다르게)", font=(FONT, 10, "bold")).pack(pady=(14, 2), **pad)
+        tk.Label(win, text="알림음 (진료실마다·호출 종류마다 다르게)", font=(FONT, 10, "bold")).pack(pady=(14, 2), **pad)
         svars = {}
-        for r in ROOMS:
+        for skey, label in (("sound1", "진료실 1 환자"), ("sound_staff1", "진료실 1 직원"),
+                            ("sound2", "진료실 2 환자"), ("sound_staff2", "진료실 2 직원")):
             row2 = tk.Frame(win)
-            row2.pack(pady=2, **pad)
-            tk.Label(row2, text="진료실 %s" % r, width=8, anchor="w").pack(side="left")
-            v = tk.StringVar(master=win, value=self.cfg.get("sound" + r) or DEFAULT_SOUNDS[r])
-            svars[r] = v
+            row2.pack(pady=1, **pad)
+            tk.Label(row2, text=label, width=12, anchor="w").pack(side="left")
+            v = tk.StringVar(master=win, value=self.cfg.get(skey) or DEFAULT_SOUNDS[skey.replace("sound_", "").replace("sound", "")])
+            svars[skey] = v
             ttk.Combobox(row2, textvariable=v, values=list(SOUNDS), state="readonly", width=18).pack(side="left")
             tk.Button(row2, text="▶ 미리 듣기", command=lambda v=v: play_sound(v.get())).pack(side="left", padx=6)
-        row_s = tk.Frame(win)
-        row_s.pack(pady=2, **pad)
-        tk.Label(row_s, text="직원 호출", width=8, anchor="w").pack(side="left")
-        sv_staff = tk.StringVar(master=win, value=self.cfg.get("sound_staff") or DEFAULT_SOUNDS["staff"])
-        ttk.Combobox(row_s, textvariable=sv_staff, values=list(SOUNDS), state="readonly", width=18).pack(side="left")
-        tk.Button(row_s, text="▶ 미리 듣기", command=lambda: play_sound(sv_staff.get())).pack(side="left", padx=6)
         tk.Label(win, text="과장님께 알림 버튼 (쉼표로 구분)", font=(FONT, 10, "bold")).pack(pady=(14, 2), **pad)
         mbv = tk.StringVar(master=win, value=", ".join(self.cfg.get("msg_buttons") or DEFAULT_MSG_BUTTONS))
         tk.Entry(win, textvariable=mbv, width=50, font=(FONT, 10)).pack(**pad)
@@ -1467,10 +1466,9 @@ class DeskApp:
                     return
             changed = k != self.cfg.get("key", "")
             self.cfg["name"] = name.get().strip() or "데스크"
-            for r, v in svars.items():
-                self.cfg["sound" + r] = v.get()
+            for skey, v in svars.items():
+                self.cfg[skey] = v.get()
             self.cfg["repeat"] = int(rep.get())
-            self.cfg["sound_staff"] = sv_staff.get()
             labels = [x.strip() for x in mbv.get().replace("，", ",").split(",") if x.strip()]
             self.cfg["msg_buttons"] = labels[:6] or DEFAULT_MSG_BUTTONS
             self.cfg["key"] = k
