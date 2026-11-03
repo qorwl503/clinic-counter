@@ -914,6 +914,8 @@ class DoctorApp:
 
         self.w["call"] = tk.Button(o, font=(FONT, 12, "bold"), command=lambda: self.on_action("call"))
         self.w["call"].pack(fill="x", ipady=4)
+        self.w["next"] = tk.Button(o, text="다음 환자 호출 (대기 −1)", font=(FONT, 9), relief="flat",
+                                   bg="#e8eef9", command=lambda: self.call(force_new=True))
         crow = tk.Frame(o, bg=BG)
         crow.pack(fill="x", pady=(2, 0))
         self.w["callinfo"] = tk.Label(crow, bg=BG, fg="#56647b", font=(FONT, 9), anchor="w")
@@ -984,17 +986,27 @@ class DoctorApp:
         self.w["wait"].config(text=("대기 %d명" % w) if connected else "대기 —",
                               fg="#17539b" if self.online else "#9aa6b8")
         self.w["done"].config(text="진료 완료 %d명" % completed)
-        kl = self.key_label("call")
-        if connected and w > 0:
-            self.w["call"].config(text="📢 다음 환자 호출" + ("  (%s)" % kl if kl else ""),
-                                  bg="#cfe3ff", fg="#12345a")
+        if self.recall_mode():
+            self.w["call"].config(text="🔁 다시 호출 (같은 환자, 대기 변화 없음)", bg="#ffe9b8", fg="#6b4a00")
+            if w > 0:
+                self.w["next"].pack(fill="x", pady=(3, 0), after=self.w["call"])
+            else:
+                self.w["next"].pack_forget()
         else:
-            self.w["call"].config(text="대기 환자 없음" + ("  (%s)" % kl if kl else ""),
-                                  bg="#eceff3", fg="#8a96a8")
+            self.w["next"].pack_forget()
+            if connected and w > 0:
+                self.w["call"].config(text="📢 다음 환자 호출 (대기 −1)", bg="#cfe3ff", fg="#12345a")
+            else:
+                self.w["call"].config(text="대기 환자 없음", bg="#eceff3", fg="#8a96a8")
         call = self.room_node.get("call") if isinstance(self.room_node, dict) else None
         if isinstance(call, dict) and call.get("d") == today():
-            self.w["callinfo"].config(text="마지막 호출 %s%s" % (call.get("time", "")[:5],
-                                                              "  (취소됨)" if call.get("cancelled") else ""))
+            if call.get("cancelled"):
+                state = "  (취소됨)"
+            elif call.get("acked"):
+                state = "  ✔ %s 확인" % call.get("acked")
+            else:
+                state = "  · 데스크 확인 전"
+            self.w["callinfo"].config(text="마지막 호출 %s%s" % (call.get("time", "")[:5], state))
             if not call.get("cancelled") and call_age(call) < 300:
                 self.w["cancel"].pack(side="right")
             else:
@@ -1187,7 +1199,13 @@ class DoctorApp:
 
         self.sender.submit(lambda: db.patch("", op["patch"]), done, failed)
 
-    def call(self):
+    def recall_mode(self):
+        """방금 한 호출을 데스크가 아직 확인 안 했으면 → 다시 호출(같은 환자)"""
+        call = self.room_node.get("call") if isinstance(self.room_node, dict) else None
+        return (isinstance(call, dict) and not call.get("cancelled") and not call.get("acked")
+                and call_age(call) < 600)
+
+    def call(self, force_new=False):
         if self.db is None:
             self.flash("먼저 ⚙ 설정에서 연결하세요.")
             return
@@ -1195,28 +1213,42 @@ class DoctorApp:
             play_alert()
             self.flash("연결이 끊겨 호출할 수 없습니다.")
             return
-        if self.waiting() <= 0:
-            self.flash("대기 환자가 없어 호출하지 않았습니다.")
-            return
         if time.time() - self.last_call_sent < 3:
             self.flash("방금 호출했습니다.")
             return
+        db, room = self.db, self.room
+        prev = self.room_node.get("call") if isinstance(self.room_node, dict) else None
+        if self.recall_mode() and not force_new:
+            # 같은 환자 다시 부르기: 대기 변화 없음
+            self.last_call_sent = time.time()
+            val = {"id": new_id(), "time": now_hms(), "d": today(), "repeat": True}
+            if isinstance(prev, dict) and prev.get("ticket"):
+                val["ticket"] = prev["ticket"]
+            self.room_node = mirror_apply(self.room_node, "put", "/call", val)
+            self.render()
+            self.runner.submit(lambda: db.put("live/rooms/%s/call" % room, val),
+                               lambda _: self.flash("🔁 %s 다시 호출 보냄" % val["time"][:5]),
+                               lambda e: (play_alert(), self.flash("호출 실패: %s" % e)))
+            return
+        if self.waiting() <= 0:
+            self.flash("대기 환자가 없어 호출하지 않았습니다.")
+            return
         self.last_call_sent = time.time()
         val = {"id": new_id(), "time": now_hms(), "d": today()}
-        db, room = self.db, self.room
         tid = tickets_today(self.room_node)[0]          # 가장 먼저 온 대기 1명이 들어감
         val["ticket"] = {"id": tid, "v": self.room_node["queue"][tid]}
         patch = {"live/rooms/%s/call" % room: val, "live/rooms/%s/queue/%s" % (room, tid): None}
         self.room_node = mirror_apply(self.room_node, "put", "/queue/" + tid, None)
+        self.room_node = mirror_apply(self.room_node, "put", "/call", val)
         self.render()
 
         def ok(_):
-            self.room_node = mirror_apply(self.room_node, "put", "/call", val)
             self.flash("📢 %s 호출 보냄 (대기 −1)" % val["time"][:5])
             self.render()
 
         def fail(e):
             self.room_node = mirror_apply(self.room_node, "put", "/queue/" + tid, val["ticket"]["v"])
+            self.room_node = mirror_apply(self.room_node, "put", "/call", prev)
             self.last_call_sent = 0
             play_alert()
             self.flash("호출 실패: %s" % e)

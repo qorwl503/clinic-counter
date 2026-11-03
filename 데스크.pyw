@@ -1080,7 +1080,7 @@ class DeskApp:
             if not isinstance(call, dict):
                 call = {}
             cid = call.get("id")
-            key = (cid, bool(call.get("cancelled")))
+            key = (cid, bool(call.get("cancelled")), bool(call.get("acked")))
             if self.last_call[r] is None:
                 self.last_call[r] = key
                 continue
@@ -1088,6 +1088,12 @@ class DeskApp:
                 continue
             prev_id = self.last_call[r][0] if isinstance(self.last_call[r], tuple) else None
             self.last_call[r] = key
+            if call.get("acked") and not call.get("cancelled"):   # 다른 데스크가 확인함
+                if r in self.unacked:
+                    self.ack(r, remote=True)
+                    self.notes[r] = "%s에서 확인함" % call.get("acked")
+                    self.render()
+                continue
             if call.get("cancelled"):            # 의사가 호출 취소
                 if cid == prev_id or r in self.unacked:
                     self.ack(r)
@@ -1102,12 +1108,13 @@ class DeskApp:
                 continue
             self.notes[r] = ""
             oid, _, on = self.owner(r)
+            again = bool(call.get("repeat"))
             if oid == self.cfg["id"]:
-                self.alert(r, call.get("time", ""), False)
+                self.alert(r, call.get("time", ""), False, again)
             elif not oid or not on:
-                self.alert(r, call.get("time", ""), True)
+                self.alert(r, call.get("time", ""), True, again)
 
-    def alert(self, r, when, unowned):
+    def alert(self, r, when, unowned, again=False):
         self.unacked.add(r)
         snd = self.cfg.get("sound" + r) or DEFAULT_SOUNDS[r]
         rep = int(self.cfg.get("repeat", 2))
@@ -1130,8 +1137,8 @@ class DeskApp:
         p.configure(bg="#fff0df")
         tk.Label(p, text="🔔 진료실 %s" % r, font=(FONT, 22, "bold"), bg="#fff0df",
                  fg="#a83725").pack(pady=(18, 0))
-        tk.Label(p, text="다음 환자 모셔주세요", font=(FONT, 15, "bold"), bg="#fff0df",
-                 fg="#a83725").pack()
+        tk.Label(p, text="🔁 다시 호출 — 같은 환자 모셔주세요" if again else "다음 환자 모셔주세요",
+                 font=(FONT, 15, "bold"), bg="#fff0df", fg="#a83725").pack()
         tk.Label(p, text="호출 %s%s" % (when, "  (담당 데스크 없음)" if unowned else ""),
                  font=(FONT, 10), bg="#fff0df").pack(pady=(4, 6))
         tk.Button(p, text="확인", width=14, font=(FONT, 11, "bold"), bg="#ffcf9e",
@@ -1139,8 +1146,16 @@ class DeskApp:
         p.protocol("WM_DELETE_WINDOW", lambda: self.ack(r))
         self.render()
 
-    def ack(self, r):
+    def ack(self, r, remote=False):
+        was = r in self.unacked
         self.unacked.discard(r)
+        call = dig(self.live, "rooms", r, "call")
+        if was and not remote and self.db and isinstance(call, dict) and not call.get("acked"):
+            # 확인했다는 사실을 진료실·다른 데스크에 알림
+            name = self.cfg.get("name", "데스크")
+            self.live = mirror_apply(self.live, "put", "/rooms/%s/call/acked" % r, name)
+            db = self.db
+            self.runner.submit(lambda: db.put("live/rooms/%s/call/acked" % r, name))
         p = self.popups.pop(r, None)
         if p is not None:
             try:
