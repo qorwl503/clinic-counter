@@ -367,7 +367,16 @@ SOUNDS = {
     "Windows 알림": "SystemAsterisk",
     "Windows 경고": "SystemHand",
 }
-DEFAULT_SOUNDS = {"1": "딩동", "2": "차임 (높은음)", "staff": "삐삐삐"}
+DEFAULT_SOUNDS = {"1": "딩동", "2": "차임 (높은음)", "staff": "삐삐삐", "msg": "부드러운 종"}
+DEFAULT_MSG_BUTTONS = ["대기", "폐암사후", "종검결과"]
+
+
+def msg_text(label):
+    """데스크 → 진료실 알림 문구"""
+    label = (label or "").strip()
+    if label in ("", "대기", "환자 대기"):
+        return "과장님, 환자 대기중입니다"
+    return "과장님, %s 대기중입니다" % label
 
 
 def sound_file(name):
@@ -837,6 +846,7 @@ class DoctorApp:
         self.seen = {}
         self.last_call_sent = 0
         self.undo_eid = None
+        self.last_msg = None
         self.events_day = None
         self.online = False
         self.sending = False
@@ -859,6 +869,7 @@ class DoctorApp:
         for s in self.streams:
             s.stop()
         self.streams, self.room_node, self.events, self.online, self.legacy, self.live = [], {}, {}, False, {}, {}
+        self.last_msg = None
         key = self.cfg.get("key")
         if not key:
             self.db = None
@@ -928,8 +939,60 @@ class DoctorApp:
         except queue.Empty:
             pass
         if changed:
+            self.check_msg()
             self.render()
         self.root.after(100, self.pump)
+
+    # ---------- 데스크 → 진료실 알림 ----------
+    def check_msg(self):
+        m = self.room_node.get("msg") if isinstance(self.room_node, dict) else None
+        mid = m.get("id") if isinstance(m, dict) else ""
+        if self.last_msg is None:
+            if self.online:
+                self.last_msg = mid
+            return
+        if not mid or mid == self.last_msg:
+            return
+        self.last_msg = mid
+        if m.get("acked") or m.get("d") != today() or call_age(m) > STALE_CALL_SEC:
+            return
+        self.show_msg(m)
+
+    def show_msg(self, m):
+        play_sound(self.cfg.get("sound_msg") or DEFAULT_SOUNDS["msg"])
+        old = getattr(self, "msg_popup", None)
+        if old is not None:
+            try:
+                old.destroy()
+            except tk.TclError:
+                pass
+        p = tk.Toplevel(self.root)
+        self.msg_popup = p
+        p.title("데스크 알림")
+        p.attributes("-topmost", True)
+        bg = "#fff3d6"
+        p.configure(bg=bg)
+        sw = p.winfo_screenwidth()
+        p.geometry("420x170+%d+80" % max(0, sw // 2 - 210))
+        tk.Label(p, text="📣 " + m.get("text", ""), font=(FONT, 16, "bold"), bg=bg, fg="#6b4a00",
+                 wraplength=390).pack(pady=(26, 4))
+        tk.Label(p, text="%s · %s" % (m.get("from", "데스크"), m.get("time", "")[:5]),
+                 font=(FONT, 10), bg=bg).pack()
+        mid = m.get("id")
+
+        def ok():
+            try:
+                p.destroy()
+            except tk.TclError:
+                pass
+            cur = self.room_node.get("msg") if isinstance(self.room_node, dict) else None
+            if self.db and isinstance(cur, dict) and cur.get("id") == mid and not cur.get("acked"):
+                self.room_node = mirror_apply(self.room_node, "put", "/msg/acked", True)
+                db, room = self.db, self.room
+                self.runner.submit(lambda: db.put("live/rooms/%s/msg/acked" % room, True))
+
+        tk.Button(p, text="확인", width=12, font=(FONT, 11, "bold"), bg="#ffe08a", command=ok).pack(pady=8)
+        p.protocol("WM_DELETE_WINDOW", ok)
 
     def set_status(self, text, color):
         self.w["net"].config(text=text, fg=color)
@@ -1375,7 +1438,13 @@ class DoctorApp:
         tk.Label(f, text="데스크 ⚙설정의 '연결 키 복사' 후 여기에 붙여넣기(Ctrl+V)", fg="#65738a",
                  font=(FONT, 8)).grid(row=2, column=1, sticky="w")
 
-        nrow = 3
+        tk.Label(f, text="데스크 알림 소리", font=(FONT, 10, "bold")).grid(row=3, column=0, sticky="w", pady=(10, 0))
+        srow = tk.Frame(f)
+        srow.grid(row=3, column=1, sticky="w", pady=(10, 0))
+        smsg = tk.StringVar(master=win, value=self.cfg.get("sound_msg") or DEFAULT_SOUNDS["msg"])
+        ttk.Combobox(srow, textvariable=smsg, values=list(SOUNDS), state="readonly", width=18).pack(side="left")
+        tk.Button(srow, text="▶ 미리 듣기", command=lambda: play_sound(smsg.get())).pack(side="left", padx=6)
+        nrow = 4
 
         def migrate():
             if self.db is None:
@@ -1426,7 +1495,7 @@ class DoctorApp:
                     messagebox.showerror("연결 키 오류", str(e), parent=win)
                     return
             reconnect = k != self.cfg.get("key", "") or room.get() != self.room
-            self.cfg.update({"key": k, "room": room.get()})
+            self.cfg.update({"key": k, "room": room.get(), "sound_msg": smsg.get()})
             save_json(CONFIG_FILE, self.cfg)
             win.destroy()
             if reconnect:

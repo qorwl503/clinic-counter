@@ -367,7 +367,16 @@ SOUNDS = {
     "Windows 알림": "SystemAsterisk",
     "Windows 경고": "SystemHand",
 }
-DEFAULT_SOUNDS = {"1": "딩동", "2": "차임 (높은음)", "staff": "삐삐삐"}
+DEFAULT_SOUNDS = {"1": "딩동", "2": "차임 (높은음)", "staff": "삐삐삐", "msg": "부드러운 종"}
+DEFAULT_MSG_BUTTONS = ["대기", "폐암사후", "종검결과"]
+
+
+def msg_text(label):
+    """데스크 → 진료실 알림 문구"""
+    label = (label or "").strip()
+    if label in ("", "대기", "환자 대기"):
+        return "과장님, 환자 대기중입니다"
+    return "과장님, %s 대기중입니다" % label
 
 
 def sound_file(name):
@@ -789,7 +798,7 @@ class DeskApp:
             save_json(CONFIG_FILE, self.cfg)
         self.root = tk.Tk()
         self.root.title("데스크 · 대기/호출 " + VERSION)
-        self.root.geometry(self.cfg.get("geometry") or "660x640+80+60")
+        self.root.geometry(self.cfg.get("geometry") or "660x720+60+40")
         self.root.minsize(600, 560)
         self.root.configure(bg=BG)
         self.top_var = tk.BooleanVar(master=self.root, value=self.cfg.get("topmost", True))
@@ -941,6 +950,17 @@ class DeskApp:
                       command=lambda r=r: self.remove(r)).pack(side="left", padx=(5, 0))
             ack = tk.Button(box, text="호출 확인", bg="#ffcf9e", font=(FONT, 11, "bold"),
                             command=lambda r=r: self.ack(r))
+            mb = tk.Frame(box, bg="#eaf2fc")
+            mb.pack(fill="x", pady=(6, 0))
+            tk.Label(mb, text="과장님께 알림", bg="#eaf2fc", fg="#65738a", font=(FONT, 8)).pack(anchor="w")
+            mbr = tk.Frame(mb, bg="#eaf2fc")
+            mbr.pack(fill="x")
+            for label in (self.cfg.get("msg_buttons") or DEFAULT_MSG_BUTTONS):
+                tk.Button(mbr, text=label, bg="#fff3d6", relief="flat", font=(FONT, 9, "bold"),
+                          command=lambda r=r, label=label: self.send_msg(r, label)).pack(
+                    side="left", padx=(0, 4), pady=1)
+            msginfo = tk.Label(mb, bg="#eaf2fc", fg="#8a6d1d", font=(FONT, 8), anchor="w")
+            msginfo.pack(fill="x")
             tl = tk.Frame(box, bg="#eaf2fc")
             tl.pack(fill="x", pady=(8, 0))
             tk.Label(tl, text="업무별 (누르면 상세)", bg="#eaf2fc", fg="#65738a",
@@ -953,7 +973,8 @@ class DeskApp:
                 lab.bind("<Button-1>", lambda e, r=r, i=i: self.task_detail(r, i))
                 rows.append(lab)
             self.w[r] = {"box": box, "own": own, "big": big, "done": done, "call": call,
-                         "ack": ack, "head": head, "btns": btns, "tl": tl, "rows": rows}
+                         "ack": ack, "head": head, "btns": btns, "tl": tl, "rows": rows,
+                         "mb": mb, "mbr": mbr, "msginfo": msginfo}
 
         bottom = tk.Frame(f, bg=BG)
         bottom.pack(fill="x", side="bottom")
@@ -1016,7 +1037,15 @@ class DeskApp:
                 w["own"].config(text="담당 없음 → 모든 데스크에 알림", fg="#bd4429")
             alert = r in self.unacked
             color = "#ffe2c4" if alert else "#eaf2fc"
-            for key in ("box", "head", "btns", "tl", "own", "big", "done", "call"):
+            m = node.get("msg") if isinstance(node.get("msg"), dict) else None
+            if m and m.get("d") == today() and call_age(m) < 1800:
+                w["msginfo"].config(text="%s '%s' 보냄 · %s" % (
+                    m.get("time", "")[:5], m.get("label", ""),
+                    "✔ 과장님 확인" if m.get("acked") else "확인 전"),
+                    fg="#21804c" if m.get("acked") else "#8a6d1d")
+            else:
+                w["msginfo"].config(text="")
+            for key in ("box", "head", "btns", "tl", "own", "big", "done", "call", "mb", "mbr", "msginfo"):
                 w[key].config(bg=color)
             for child in list(w["head"].winfo_children()) + list(w["tl"].winfo_children())[:1]:
                 child.config(bg=color)
@@ -1162,6 +1191,26 @@ class DeskApp:
                 self.alert(r, call.get("time", ""), False, again)
             elif not oid or not on:
                 self.alert(r, call.get("time", ""), True, again)
+
+    # ---------- 데스크 → 진료실 알림 ----------
+    def send_msg(self, r, label):
+        if not self.need_db():
+            return
+        if not self.online:
+            play_alert()
+            self.set_status("연결이 끊겨 알림을 보낼 수 없습니다", "#a44b4b")
+            return
+        last = getattr(self, "last_msg_sent", {})
+        if time.time() - last.get(r, 0) < 3:
+            return
+        last[r] = time.time()
+        self.last_msg_sent = last
+        val = {"id": new_id(), "label": label, "text": msg_text(label), "time": now_hms(),
+               "d": today(), "from": self.cfg.get("name", "데스크")}
+        self.live = mirror_apply(self.live, "put", "/rooms/%s/msg" % r, val)
+        self.render()
+        db = self.db
+        self.runner.submit(lambda: db.put("live/rooms/%s/msg" % r, val), fail=self.fail)
 
     # ---------- 직원 호출 ----------
     def check_staff(self):
@@ -1386,6 +1435,11 @@ class DeskApp:
         sv_staff = tk.StringVar(master=win, value=self.cfg.get("sound_staff") or DEFAULT_SOUNDS["staff"])
         ttk.Combobox(row_s, textvariable=sv_staff, values=list(SOUNDS), state="readonly", width=18).pack(side="left")
         tk.Button(row_s, text="▶ 미리 듣기", command=lambda: play_sound(sv_staff.get())).pack(side="left", padx=6)
+        tk.Label(win, text="과장님께 알림 버튼 (쉼표로 구분)", font=(FONT, 10, "bold")).pack(pady=(14, 2), **pad)
+        mbv = tk.StringVar(master=win, value=", ".join(self.cfg.get("msg_buttons") or DEFAULT_MSG_BUTTONS))
+        tk.Entry(win, textvariable=mbv, width=50, font=(FONT, 10)).pack(**pad)
+        tk.Label(win, text="예: 대기, 폐암사후, 종검결과 → 진료실에 '과장님, 폐암사후 대기중입니다'로 표시 (저장 후 다시 켜면 반영)",
+                 fg="#65738a", font=(FONT, 8)).pack(**pad)
         row3 = tk.Frame(win)
         row3.pack(pady=2, **pad)
         tk.Label(row3, text="반복 횟수", width=8, anchor="w").pack(side="left")
@@ -1406,6 +1460,8 @@ class DeskApp:
                 self.cfg["sound" + r] = v.get()
             self.cfg["repeat"] = int(rep.get())
             self.cfg["sound_staff"] = sv_staff.get()
+            labels = [x.strip() for x in mbv.get().replace("，", ",").split(",") if x.strip()]
+            self.cfg["msg_buttons"] = labels[:6] or DEFAULT_MSG_BUTTONS
             self.cfg["key"] = k
             save_json(CONFIG_FILE, self.cfg)
             win.destroy()
