@@ -369,6 +369,19 @@ SOUNDS = {
     "딩동 두 번": [(988, 0.2), (784, 0.35), (0, 0.15), (988, 0.2), (784, 0.35)],
     "딩동 두 번 (낮게)": [(659, 0.22), (523, 0.38), (0, 0.15), (659, 0.22), (523, 0.38)],
     "딩동댕": [(784, 0.22), (988, 0.22), (1175, 0.45)],
+    # --- 병원·은행·식당에서 흔한 호출음 (직접 합성) ---
+    "번호표 띵동": [(1175, 0.35, "bell"), (932, 0.7, "bell")],
+    "번호표 띵동 (낮게)": [(784, 0.38, "bell"), (622, 0.75, "bell")],
+    "안내방송 차임 (올림)": [(523, 0.3, "bell"), (659, 0.3, "bell"), (784, 0.3, "bell"), (1047, 0.8, "bell")],
+    "안내방송 차임 (내림)": [(1047, 0.3, "bell"), (784, 0.3, "bell"), (659, 0.3, "bell"), (523, 0.8, "bell")],
+    "웨스트민스터 차임": [(659, 0.45, "bell"), (523, 0.45, "bell"), (587, 0.45, "bell"), (392, 0.9, "bell")],
+    "진동벨 삐리리": [(2093, 0.07), (1568, 0.07)] * 6,
+    "진동벨 부저": [(330, 0.35, "square"), (0, 0.12), (330, 0.35, "square")],
+    "주방 호출 삐빅": [(1760, 0.09, "square"), (0, 0.05), (1760, 0.09, "square"), (0, 0.25),
+                   (1760, 0.09, "square"), (0, 0.05), (1760, 0.09, "square")],
+    "마림바 띵동": [(1047, 0.25, "marimba"), (784, 0.4, "marimba")],
+    "마림바 3음": [(784, 0.18, "marimba"), (988, 0.18, "marimba"), (1175, 0.35, "marimba")],
+    "메시지 띠링": [(1568, 0.12, "marimba"), (2093, 0.3, "marimba")],
     "차임 (높은음)": [(1319, 0.18), (1568, 0.18), (2093, 0.4)],
     "차임 (낮은음)": [(523, 0.25), (659, 0.25), (784, 0.45)],
     "삐삐삐": [(1000, 0.12), (0, 0.08), (1000, 0.12), (0, 0.08), (1000, 0.12)],
@@ -403,13 +416,26 @@ def sound_file(name):
     if path.exists():
         return path
     rate, frames = 22050, bytearray()
-    for freq, dur in notes:
+    for note in notes:
+        freq, dur = note[0], note[1]
+        kind = note[2] if len(note) > 2 else "sine"
         n = int(rate * dur)
         for k in range(n):
             if freq:
-                env = min(1.0, k / (rate * 0.01)) * math.exp(-3.0 * k / n)
-                v = env * (0.6 * math.sin(2 * math.pi * freq * k / rate) +
-                           0.2 * math.sin(4 * math.pi * freq * k / rate))
+                ph = 2 * math.pi * freq * k / rate
+                if kind == "bell":      # 종소리: 배음 많고 길게 울림
+                    env = min(1.0, k / (rate * 0.005)) * math.exp(-2.2 * k / n)
+                    v = env * (0.5 * math.sin(ph) + 0.25 * math.sin(2.76 * ph) +
+                               0.12 * math.sin(5.4 * ph) + 0.08 * math.sin(2 * ph))
+                elif kind == "square":  # 부저·진동벨
+                    env = min(1.0, k / (rate * 0.005)) * (1.0 if k < n * 0.85 else (n - k) / (n * 0.15))
+                    v = env * 0.35 * (1 if math.sin(ph) >= 0 else -1)
+                elif kind == "marimba":  # 짧고 둥근 소리
+                    env = min(1.0, k / (rate * 0.003)) * math.exp(-7.0 * k / n)
+                    v = env * (0.7 * math.sin(ph) + 0.15 * math.sin(4 * ph))
+                else:
+                    env = min(1.0, k / (rate * 0.01)) * math.exp(-3.0 * k / n)
+                    v = env * (0.6 * math.sin(ph) + 0.2 * math.sin(2 * ph))
             else:
                 v = 0.0
             frames += struct.pack("<h", int(max(-1, min(1, v)) * 30000))
