@@ -389,7 +389,7 @@ def ask_key(parent, title, current=""):
     win.resizable(False, False)
     tk.Label(win, text="데스크 프로그램의 '연결 키'를 붙여넣으세요 (Ctrl+V)",
              font=(FONT, 10)).pack(padx=14, pady=(14, 6), anchor="w")
-    var = tk.StringVar(value=current)
+    var = tk.StringVar(master=win, value=current)
     ent = tk.Entry(win, textvariable=var, width=70, font=(FONT, 9))
     ent.pack(padx=14, fill="x")
     ent.focus_set()
@@ -1121,13 +1121,13 @@ class DeskApp:
         win.resizable(False, False)
         pad = {"padx": 14, "anchor": "w"}
         tk.Label(win, text="이 데스크 이름", font=(FONT, 10, "bold")).pack(pady=(14, 2), **pad)
-        name = tk.StringVar(value=self.cfg.get("name", "데스크"))
+        name = tk.StringVar(master=win, value=self.cfg.get("name", "데스크"))
         tk.Entry(win, textvariable=name, width=24, font=(FONT, 10)).pack(**pad)
         tk.Label(win, text="예: 데스크 1, 데스크 2 (호출 담당 표시에 사용)", fg="#65738a",
                  font=(FONT, 8)).pack(**pad)
 
         tk.Label(win, text="연결 키", font=(FONT, 10, "bold")).pack(pady=(14, 2), **pad)
-        key = tk.StringVar(value=self.cfg.get("key", ""))
+        key = tk.StringVar(master=win, value=self.cfg.get("key", ""))
         tk.Entry(win, textvariable=key, width=72, font=(FONT, 9)).pack(padx=14, fill="x")
         row = tk.Frame(win)
         row.pack(pady=6, **pad)

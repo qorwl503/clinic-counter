@@ -389,7 +389,7 @@ def ask_key(parent, title, current=""):
     win.resizable(False, False)
     tk.Label(win, text="데스크 프로그램의 '연결 키'를 붙여넣으세요 (Ctrl+V)",
              font=(FONT, 10)).pack(padx=14, pady=(14, 6), anchor="w")
-    var = tk.StringVar(value=current)
+    var = tk.StringVar(master=win, value=current)
     ent = tk.Entry(win, textvariable=var, width=70, font=(FONT, 9))
     ent.pack(padx=14, fill="x")
     ent.focus_set()
@@ -736,44 +736,6 @@ def find_old_counts():
     return found
 
 
-class HotkeyThread(threading.Thread):
-    """Windows 전역 단축키. 별도 스레드의 메시지 루프에서 받아 queue로 전달."""
-    WM_HOTKEY, WM_QUIT = 0x0312, 0x0012
-
-    def __init__(self, bindings, out):
-        super().__init__(daemon=True)
-        self.bindings, self.out = bindings, out
-        self.tid = None
-        self.ready = threading.Event()
-
-    def run(self):
-        import ctypes
-        from ctypes import wintypes
-        user32 = ctypes.WinDLL("user32", use_last_error=True)
-        kernel32 = ctypes.WinDLL("kernel32")
-        msg = wintypes.MSG()
-        user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 0)
-        self.tid = kernel32.GetCurrentThreadId()
-        failed, ok = [], []
-        for hid, (action, mods, vk, label) in enumerate(self.bindings, start=1):
-            if user32.RegisterHotKey(None, hid, mods | 0x4000, vk):
-                ok.append(hid)
-            else:
-                failed.append(label)
-        self.out.put(("failed", failed))
-        self.ready.set()
-        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-            if msg.message == self.WM_HOTKEY and 1 <= msg.wParam <= len(self.bindings):
-                self.out.put(("key", self.bindings[msg.wParam - 1][0]))
-        for hid in ok:
-            user32.UnregisterHotKey(None, hid)
-
-    def stop(self):
-        if sys.platform == "win32" and self.ready.wait(2) and self.tid:
-            import ctypes
-            ctypes.WinDLL("user32").PostThreadMessageW(self.tid, self.WM_QUIT, 0, 0)
-
-
 class DoctorApp:
     def __init__(self):
         self.cfg = load_json(CONFIG_FILE, {})
@@ -924,17 +886,17 @@ class DoctorApp:
         for i, name in enumerate(NAMES):
             row = tk.Frame(o, bg="white", pady=2)
             row.pack(fill="x", pady=2)
-            key = tk.Label(row, bg="white", fg="#7a879b", width=5, font=(FONT, 8))
-            key.pack(side="left", padx=(4, 0))
+            key = tk.Label(row, bg="white", width=1)
+            key.pack(side="left")
             nl = tk.Label(row, text=name, bg="white", fg="#22324a", width=15, anchor="w",
                           font=(FONT, 10, "underline"), cursor="hand2")
             nl.pack(side="left")
             nl.bind("<Button-1>", lambda e, j=i: self.task_detail(j))
             val = tk.Label(row, text="0", bg="white", fg=COLORS[i], width=4, font=(FONT, 12, "bold"))
             val.pack(side="left", expand=True)
-            tk.Button(row, text="−", width=3, relief="flat", bg="#e9edf4",
+            tk.Button(row, text="−", width=3, relief="flat", bg="#e9edf4", font=(FONT, 11),
                       command=lambda j=i: self.unrecord(j)).pack(side="right", padx=(2, 5))
-            tk.Button(row, text="+", width=3, relief="flat", bg="#dbeaff",
+            tk.Button(row, text="+", width=5, relief="flat", bg="#cfe3ff", font=(FONT, 12, "bold"),
                       command=lambda j=i: self.record(j)).pack(side="right", padx=2)
             self.w["rows"].append((key, val))
 
@@ -960,11 +922,7 @@ class DoctorApp:
         save_json(CONFIG_FILE, self.cfg)
 
     def key_label(self, action):
-        k = self.cfg["keys"].get(action, "없음")
-        if k == "없음":
-            return ""
-        m = self.cfg.get("mod", "없음")
-        return k if m == "없음" else m + "+" + k
+        return ""
 
     def waiting(self):
         return len(tickets_today(self.room_node))
@@ -1175,20 +1133,8 @@ class DoctorApp:
 
     # ---------- 단축키 ----------
     def start_hotkeys(self):
-        if self.hotkeys:
-            self.hotkeys.stop()
-            self.hotkeys = None
-        if sys.platform != "win32":
-            return
-        mods = MODS.get(self.cfg.get("mod", "없음"), 0)
-        bindings = []
-        for action, label in ACTIONS:
-            k = self.cfg["keys"].get(action, "없음")
-            if k in KEYS and k != "없음":
-                vk = 0x70 + int(k[1:]) - 1
-                bindings.append((action, mods, vk, "%s(%s)" % (label, self.key_label(action))))
-        self.hotkeys = HotkeyThread(bindings, self.hk_queue)
-        self.hotkeys.start()
+        """단축키는 사용하지 않음 (EMR과 충돌) — 버튼 클릭만 사용"""
+        return
 
     # ---------- 설정 / 기록 ----------
     def task_detail(self, task):
@@ -1211,32 +1157,19 @@ class DoctorApp:
         f = tk.Frame(win, padx=14, pady=12)
         f.pack()
         tk.Label(f, text="이 PC의 진료실", font=(FONT, 10, "bold")).grid(row=0, column=0, sticky="w")
-        room = tk.StringVar(value=self.room)
+        room = tk.StringVar(master=win, value=self.room)
         rr = tk.Frame(f)
         rr.grid(row=0, column=1, sticky="w")
         for r in ROOMS:
             tk.Radiobutton(rr, text="진료실 " + r, variable=room, value=r).pack(side="left")
 
         tk.Label(f, text="연결 키", font=(FONT, 10, "bold")).grid(row=1, column=0, sticky="w", pady=(10, 0))
-        key = tk.StringVar(value=self.cfg.get("key", ""))
+        key = tk.StringVar(master=win, value=self.cfg.get("key", ""))
         tk.Entry(f, textvariable=key, width=52, font=(FONT, 8)).grid(row=1, column=1, sticky="we", pady=(10, 0))
         tk.Label(f, text="데스크 ⚙설정의 '연결 키 복사' 후 여기에 붙여넣기(Ctrl+V)", fg="#65738a",
                  font=(FONT, 8)).grid(row=2, column=1, sticky="w")
 
-        tk.Label(f, text="단축키 조합", font=(FONT, 10, "bold")).grid(row=3, column=0, sticky="w", pady=(12, 0))
-        mod = tk.StringVar(value=self.cfg.get("mod", "없음"))
-        ttk.Combobox(f, textvariable=mod, values=list(MODS), state="readonly", width=12).grid(
-            row=3, column=1, sticky="w", pady=(12, 0))
-        tk.Label(f, text="EMR 단축키와 겹치면 Ctrl 또는 Ctrl+Alt 조합을 선택하세요.", fg="#65738a",
-                 font=(FONT, 8)).grid(row=4, column=1, sticky="w")
-        kv = {}
-        for i, (action, label) in enumerate(ACTIONS):
-            tk.Label(f, text=label, font=(FONT, 9)).grid(row=5 + i, column=0, sticky="w", padx=(8, 0))
-            v = tk.StringVar(value=self.cfg["keys"].get(action, "없음"))
-            kv[action] = v
-            ttk.Combobox(f, textvariable=v, values=KEYS, state="readonly", width=8).grid(
-                row=5 + i, column=1, sticky="w", pady=1)
-        nrow = 5 + len(ACTIONS)
+        nrow = 3
 
         def migrate():
             if self.db is None:
@@ -1286,13 +1219,8 @@ class DoctorApp:
                 except ValueError as e:
                     messagebox.showerror("연결 키 오류", str(e), parent=win)
                     return
-            used = [v.get() for v in kv.values() if v.get() != "없음"]
-            if len(used) != len(set(used)):
-                messagebox.showerror("단축키", "같은 키가 두 번 지정되었습니다.", parent=win)
-                return
             reconnect = k != self.cfg.get("key", "") or room.get() != self.room
-            self.cfg.update({"key": k, "room": room.get(), "mod": mod.get(),
-                             "keys": {a: v.get() for a, v in kv.items()}})
+            self.cfg.update({"key": k, "room": room.get()})
             save_json(CONFIG_FILE, self.cfg)
             win.destroy()
             if reconnect:
