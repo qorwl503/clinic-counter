@@ -1043,13 +1043,13 @@ class DoctorApp:
                                      font=(FONT, 9), command=self.cancel_call)
         srow = tk.Frame(o, bg=BG)
         srow.pack(fill="x", pady=(4, 0))
-        self.w["staff"] = tk.Button(srow, text="🙋 직원 호출", font=(FONT, 10, "bold"), bg="#e6dcff",
-                                    fg="#4a2690", relief="flat", command=self.staff_call)
-        self.w["staff"].pack(side="left", ipadx=8, ipady=2)
+        self.w["staff"] = tk.Button(srow, text="🙋 직원 호출", font=(FONT, 11, "bold"), bg="#e6dcff",
+                                    fg="#4a2690", activebackground="#d2c2ff", relief="raised", bd=3,
+                                    cursor="hand2", command=self.staff_call)
+        self.w["staff"].pack(side="left", ipadx=10, ipady=3)
         self.w["staffinfo"] = tk.Label(srow, bg=BG, fg="#5b2fa8", font=(FONT, 9), anchor="w")
         self.w["staffinfo"].pack(side="left", padx=8)
-        self.w["recv"] = tk.Label(o, bg=BG, font=(FONT, 9), anchor="w")
-        self.w["recv"].pack(fill="x", pady=(0, 4))
+        self.w["recv"] = tk.Label(o, bg=BG, font=(FONT, 9, "bold"), anchor="w")
         mrow = tk.Frame(o, bg=BG)
         mrow.pack(fill="x", pady=(0, 2))
         self.w["msg"] = tk.Label(mrow, bg=BG, fg="#bd4429", font=(FONT, 10, "bold"), anchor="w")
@@ -1057,8 +1057,6 @@ class DoctorApp:
         self.w["undo"] = tk.Button(mrow, text="↶ 되돌리기", relief="flat", bg="#ffe9b8",
                                    font=(FONT, 10, "bold"), command=self.undo_last)
 
-        tk.Label(o, text="데스크가 호출 확인(환자 입실)하면 대기 −1 · 업무 + 는 진료 완료 기록 · − 는 되돌리기",
-                 bg=BG, fg="#65738a", font=(FONT, 8), anchor="w").pack(fill="x", pady=(0, 3))
         self.w["rows"] = []
         for i, name in enumerate(NAMES):
             row = tk.Frame(o, bg="white", pady=2)
@@ -1146,22 +1144,14 @@ class DoctorApp:
         else:
             self.w["staffinfo"].config(text="")
             self.w["staff"].config(text="🙋 직원 호출")
-        # 호출 받을 데스크 표시
-        if self.db is None or not self.online:
-            self.w["recv"].config(text="", fg="#56647b")
+        # 켜진 데스크가 하나도 없을 때만 경고 표시
+        no_desk = (self.db is not None and self.online and
+                   not [d for d in (dig(self.live, "desks") or {}) if desk_alive(self.live, d, self.seen)])
+        if no_desk:
+            self.w["recv"].config(text="⚠ 켜진 데스크가 없습니다 — 호출이 전달되지 않아요", fg="#c0392b")
+            self.w["recv"].pack(fill="x", pady=(2, 2), after=self.w["staff"].master)
         else:
-            oid = dig(self.live, "assign", self.room) or ""
-            if oid and desk_alive(self.live, oid, self.seen):
-                self.w["recv"].config(text="호출 받는 곳: %s" % (dig(self.live, "desks", oid, "name") or "데스크"),
-                                      fg="#21804c")
-            else:
-                alive = [d for d in (dig(self.live, "desks") or {}) if desk_alive(self.live, d, self.seen)]
-                if alive:
-                    self.w["recv"].config(text="담당 데스크 없음 → 켜진 데스크 %d곳 모두에 알림" % len(alive),
-                                          fg="#8a6d1d")
-                else:
-                    self.w["recv"].config(text="⚠ 켜진 데스크가 없습니다 — 호출이 전달되지 않아요",
-                                          fg="#c0392b")
+            self.w["recv"].pack_forget()
         for i, (key, val) in enumerate(self.w["rows"]):
             key.config(text=self.key_label("task%d" % i))
             val.config(text=str(counts[i]))

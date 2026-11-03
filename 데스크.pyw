@@ -959,19 +959,22 @@ class DeskApp:
             call.pack(fill="x", pady=(2, 5))
             btns = tk.Frame(box, bg="#eaf2fc")
             btns.pack(fill="x")
-            tk.Button(btns, text="＋ 대기 등록", bg="#cfe3ff", font=(FONT, 12, "bold"),
+            tk.Button(btns, text="＋ 대기 등록", bg="#cfe3ff", font=(FONT, 12, "bold"), relief="raised", bd=3,
+                      activebackground="#b5d3ff", cursor="hand2",
                       command=lambda r=r: self.add(r)).pack(side="left", fill="x", expand=True)
-            tk.Button(btns, text="− 취소", bg="#f1f2f5", font=(FONT, 10),
+            tk.Button(btns, text="− 취소", bg="#f1f2f5", font=(FONT, 10), relief="raised", bd=3, cursor="hand2",
                       command=lambda r=r: self.remove(r)).pack(side="left", padx=(5, 0))
-            ack = tk.Button(box, text="호출 확인", bg="#ffcf9e", font=(FONT, 11, "bold"),
+            ack = tk.Button(box, text="호출 확인", bg="#ffcf9e", font=(FONT, 11, "bold"), relief="raised", bd=3,
+                            cursor="hand2",
                             command=lambda r=r: self.ack(r))
             mb = tk.Frame(box, bg="#eaf2fc")
             mb.pack(fill="x", pady=(6, 0))
-            tk.Label(mb, text="과장님께 알림", bg="#eaf2fc", fg="#65738a", font=(FONT, 8)).pack(anchor="w")
+            tk.Label(mb, text="진료실 알림", bg="#eaf2fc", fg="#65738a", font=(FONT, 8)).pack(anchor="w")
             mbr = tk.Frame(mb, bg="#eaf2fc")
             mbr.pack(fill="x")
             for label in (self.cfg.get("msg_buttons") or DEFAULT_MSG_BUTTONS):
-                tk.Button(mbr, text=label, bg="#fff3d6", relief="flat", font=(FONT, 9, "bold"),
+                tk.Button(mbr, text=label, bg="#ffe9b0", activebackground="#ffd97a", relief="raised", bd=3,
+                          cursor="hand2", font=(FONT, 10, "bold"), padx=6,
                           command=lambda r=r, label=label: self.send_msg(r, label)).pack(
                     side="left", padx=(0, 4), pady=1)
             msginfo = tk.Label(mb, bg="#eaf2fc", fg="#8a6d1d", font=(FONT, 8), anchor="w")
@@ -1445,7 +1448,7 @@ class DeskApp:
             svars[skey] = v
             ttk.Combobox(row2, textvariable=v, values=list(SOUNDS), state="readonly", width=18).pack(side="left")
             tk.Button(row2, text="▶ 미리 듣기", command=lambda v=v: play_sound(v.get())).pack(side="left", padx=6)
-        tk.Label(win, text="과장님께 알림 버튼 (쉼표로 구분)", font=(FONT, 10, "bold")).pack(pady=(14, 2), **pad)
+        tk.Label(win, text="진료실 알림 버튼 (쉼표로 구분)", font=(FONT, 10, "bold")).pack(pady=(14, 2), **pad)
         mbv = tk.StringVar(master=win, value=", ".join(self.cfg.get("msg_buttons") or DEFAULT_MSG_BUTTONS))
         tk.Entry(win, textvariable=mbv, width=50, font=(FONT, 10)).pack(**pad)
         tk.Label(win, text="예: 대기, 폐암사후, 종검결과 → 진료실에 '과장님, 폐암사후 상담 대기중입니다'로 표시 (저장 후 다시 켜면 반영)",
