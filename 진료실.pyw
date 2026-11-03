@@ -408,8 +408,11 @@ class StatsWindow:
             for r in self.rooms:
                 d[r][1] = task_counts(node, r)
                 done = dig(node, "done", r) or {}
-                d[r][0] = len(done)
-                for v in done.values():
+                d[r][0] = len(done) + sum(d[r][1])
+                times = [v for v in done.values() if isinstance(v, dict)]
+                times += [e for e in (dig(node, "events") or {}).values()
+                          if isinstance(e, dict) and e.get("room") == r]
+                for v in times:
                     try:
                         hours[r][int(str(v.get("time", "0"))[:2])] += 1
                     except (ValueError, AttributeError):
@@ -536,9 +539,27 @@ COLORS = ["#286bd5", "#0f8b7c", "#9557bd", "#c77923", "#b34d79", "#527a38", "#65
 MODS = {"없음": 0, "Ctrl": 2, "Alt": 1, "Shift": 4, "Ctrl+Alt": 3, "Ctrl+Shift": 6, "Alt+Shift": 5}
 KEYS = ["없음"] + ["F%d" % i for i in range(1, 13)]
 ACTIONS = [("task%d" % i, NAMES[i]) for i in range(len(NAMES))] + \
-          [("call", "다음 환자 호출"), ("done", "진료 완료")]
+          [("call", "다음 환자 호출")]
 DEFAULT_KEYS = {"task0": "F6", "task1": "F7", "task2": "F8", "task3": "F9", "task4": "F10",
-                "task5": "F11", "task6": "없음", "call": "F12", "done": "없음"}
+                "task5": "F11", "task6": "없음", "call": "F12"}
+
+
+def find_old_counts():
+    """이전 버전 counts.json 위치 찾기 (Microsoft Store 파이썬은 별도 폴더에 저장됨)"""
+    local = Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
+    found = []
+    cands = [OLD_COUNTS, Path.home() / "ClinicCounter" / "counts.json"]
+    try:
+        cands += list((local / "Packages").glob("PythonSoftwareFoundation.Python*/LocalCache/Local/ClinicCounter/counts.json"))
+    except OSError:
+        pass
+    for p in cands:
+        try:
+            if p.is_file() and p not in found:
+                found.append(p)
+        except OSError:
+            pass
+    return found
 
 
 class HotkeyThread(threading.Thread):
@@ -718,14 +739,8 @@ class DoctorApp:
         self.w["callinfo"] = tk.Label(o, bg=BG, fg="#56647b", font=(FONT, 9), anchor="w")
         self.w["callinfo"].pack(fill="x", pady=(2, 4))
 
-        drow = tk.Frame(o, bg=BG)
-        drow.pack(fill="x", pady=(0, 4))
-        self.w["done_btn"] = tk.Button(drow, bg="#d9f0df", fg="#1d5a32", font=(FONT, 11, "bold"),
-                                       command=lambda: self.on_action("done"))
-        self.w["done_btn"].pack(side="left", fill="x", expand=True, ipady=2)
-        tk.Button(drow, text="완료 취소", relief="flat", bg="#eef1f6", font=(FONT, 9),
-                  command=self.undo_done).pack(side="left", padx=(5, 0))
-
+        tk.Label(o, text="업무 + 를 누르면 진료 완료(대기 −1)로 함께 기록됩니다. − 는 되돌리기.",
+                 bg=BG, fg="#65738a", font=(FONT, 8), anchor="w").pack(fill="x", pady=(0, 3))
         self.w["rows"] = []
         for i, name in enumerate(NAMES):
             row = tk.Frame(o, bg="white", pady=2)
@@ -777,10 +792,11 @@ class DoctorApp:
         self.w["title"].config(text="진료실 %s" % self.room)
         counts = task_counts(self.events, self.room)
         done = done_ids(self.events, self.room)
+        completed = len(done) + sum(counts)
         connected = self.db is not None and (self.online or self.room_node)
         w = self.waiting()
         self.w["wait"].config(text=("대기 %d명" % w) if connected else "대기 —")
-        self.w["done"].config(text="완료 %d명 · 업무 %d건" % (len(done), sum(counts)))
+        self.w["done"].config(text="진료 완료 %d명" % completed)
         kl = self.key_label("call")
         if connected and w > 0:
             self.w["call"].config(text="📢 다음 환자 호출" + ("  (%s)" % kl if kl else ""),
@@ -788,8 +804,6 @@ class DoctorApp:
         else:
             self.w["call"].config(text="대기 환자 없음" + ("  (%s)" % kl if kl else ""),
                                   bg="#eceff3", fg="#8a96a8")
-        kd = self.key_label("done")
-        self.w["done_btn"].config(text="✔ 진료 완료  (대기 −1, 완료 +1)" + ("  %s" % kd if kd else ""))
         call = self.room_node.get("call") if isinstance(self.room_node, dict) else None
         if isinstance(call, dict) and call.get("d") == today():
             self.w["callinfo"].config(text="마지막 호출 %s" % call.get("time", "")[:5])
@@ -835,8 +849,6 @@ class DoctorApp:
     def on_action(self, action):
         if action == "call":
             self.call()
-        elif action == "done":
-            self.complete()
         elif action.startswith("task"):
             self.record(int(action[4:]))
 
@@ -865,8 +877,18 @@ class DoctorApp:
             return
         eid, day = new_id(), today()
         ev = {"room": self.room, "task": task, "time": now_hms()}
-        self.queue_op(eid, {"days/%s/events/%s" % (day, eid): ev},
-                      [("/events/" + eid, ev)] if day == self.events_day else [])
+        patch, mirror = {}, []
+        claimed = {k.rsplit("/", 1)[1] for op in self.outbox for k in op["patch"] if "/queue/" in k}
+        ids = [t for t in tickets_today(self.room_node) if t not in claimed]
+        if ids:
+            tid = ids[0]
+            ev["ticket"] = {"id": tid, "v": self.room_node["queue"][tid]}
+            patch["live/rooms/%s/queue/%s" % (self.room, tid)] = None
+            mirror.append(("q:" + tid, None))
+        patch["days/%s/events/%s" % (day, eid)] = ev
+        if day == self.events_day:
+            mirror.append(("/events/" + eid, ev))
+        self.queue_op(eid, patch, mirror)
 
     def unrecord(self, task):
         mine = sorted((k for k, e in (dig(self.events, "events") or {}).items()
@@ -874,34 +896,6 @@ class DoctorApp:
                       reverse=True)
         if mine:
             self.remove_item(mine[0], "ev")
-
-    def complete(self):
-        if not self.need_db():
-            return
-        eid, day = new_id(), today()
-        val = {"time": now_hms()}
-        patch, mirror = {}, []
-        claimed = {k.rsplit("/", 1)[1] for op in self.outbox for k in op["patch"] if "/queue/" in k}
-        ids = [t for t in tickets_today(self.room_node) if t not in claimed]
-        if ids:
-            tid = ids[0]
-            val["ticket"] = {"id": tid, "v": self.room_node["queue"][tid]}
-            patch["live/rooms/%s/queue/%s" % (self.room, tid)] = None
-            mirror.append(("q:" + tid, None))
-        else:
-            self.flash("대기 0명 — 완료 인원만 +1 했습니다.")
-        patch["days/%s/done/%s/%s" % (day, self.room, eid)] = val
-        mirror.append(("/done/%s/%s" % (self.room, eid), val))
-        self.queue_op(eid, patch, mirror)
-
-    def undo_done(self):
-        done = done_ids(self.events, self.room)
-        if not done:
-            self.flash("취소할 진료 완료가 없습니다.")
-            return
-        if messagebox.askyesno("완료 취소", "마지막 진료 완료(%s)를 취소하고 대기를 되돌릴까요?"
-                               % self.events["done"][self.room][done[-1]].get("time", ""), parent=self.root):
-            self.remove_item(done[-1], "done")
 
     def delete_selected(self):
         sel = self.w["list"].curselection()
@@ -1052,22 +1046,40 @@ class DoctorApp:
         nrow = 5 + len(ACTIONS)
 
         def migrate():
-            data = load_json(OLD_COUNTS, {})
-            rows = {k: v for k, v in data.items() if isinstance(v, list) and len(k) == 10}
-            if not rows:
-                messagebox.showinfo("이전 기록", "이 PC에서 이전 버전 기록을 찾지 못했습니다.", parent=win)
-                return
             if self.db is None:
                 messagebox.showinfo("이전 기록", "먼저 연결 키를 저장하세요.", parent=win)
                 return
-            clean = {k: [int(x) if isinstance(x, int) else 0 for x in v][:len(NAMES)] +
-                     [0] * (len(NAMES) - len(v)) for k, v in rows.items()}
-            if not messagebox.askyesno("이전 기록", "이전 버전 기록 %d일치를 진료실 %s 기록으로 올립니다.\n"
-                                       "(같은 날짜는 덮어씀) 계속할까요?" % (len(clean), self.room), parent=win):
+            found = find_old_counts()
+            if not found:
+                if not messagebox.askyesno(
+                        "이전 기록", "이전 기록 파일을 자동으로 찾지 못했습니다.\n"
+                        "counts.json 파일(또는 이전 버전의 'JSON 백업' 파일)을 직접 선택할까요?", parent=win):
+                    return
+                path = filedialog.askopenfilename(parent=win, filetypes=[("JSON", "*.json")])
+                if not path:
+                    return
+                found = [Path(path)]
+            rows = {}
+            for path in found:
+                data = load_json(path, {})
+                for k, v in data.items():
+                    if isinstance(v, list) and len(k) == 10 and k[4] == "-":
+                        v = [int(x) if isinstance(x, int) and x > 0 else 0 for x in v][:len(NAMES)]
+                        v += [0] * (len(NAMES) - len(v))
+                        if sum(v) >= sum(rows.get(k, [0])):
+                            rows[k] = v
+            if not rows:
+                messagebox.showinfo("이전 기록", "선택한 파일에 날짜별 기록이 없습니다.", parent=win)
+                return
+            days = sorted(rows)
+            total = sum(sum(v) for v in rows.values())
+            if not messagebox.askyesno("이전 기록", "이전 기록 %d일치 (%s ~ %s, 총 %d건)를\n진료실 %s 기록으로 올립니다.\n"
+                                       "(같은 날짜는 최신 값으로 덮어씀) 계속할까요?"
+                                       % (len(days), days[0], days[-1], total, self.room), parent=win):
                 return
             db, r = self.db, self.room
-            self.runner.submit(lambda: db.patch("legacy/" + r, clean),
-                               lambda _: messagebox.showinfo("완료", "이전 기록을 올렸습니다.", parent=win),
+            self.runner.submit(lambda: db.patch("legacy/" + r, rows),
+                               lambda _: messagebox.showinfo("완료", "이전 기록을 올렸습니다.\n📅 기록에서 확인할 수 있습니다.", parent=win),
                                lambda e: messagebox.showerror("실패", str(e), parent=win))
 
         tk.Button(f, text="이전 버전(v12) 기록 서버로 올리기", command=migrate).grid(

@@ -408,8 +408,11 @@ class StatsWindow:
             for r in self.rooms:
                 d[r][1] = task_counts(node, r)
                 done = dig(node, "done", r) or {}
-                d[r][0] = len(done)
-                for v in done.values():
+                d[r][0] = len(done) + sum(d[r][1])
+                times = [v for v in done.values() if isinstance(v, dict)]
+                times += [e for e in (dig(node, "events") or {}).values()
+                          if isinstance(e, dict) and e.get("room") == r]
+                for v in times:
                     try:
                         hours[r][int(str(v.get("time", "0"))[:2])] += 1
                     except (ValueError, AttributeError):
@@ -717,8 +720,8 @@ class DeskApp:
             w = self.w[r]
             node = dig(self.live, "rooms", r) or {}
             waiting = len(tickets_today(node))
-            patients = len(done_ids(self.events, r))
             counts = task_counts(self.events, r)
+            patients = len(done_ids(self.events, r)) + sum(counts)
             if self.db is None or not self.live and not self.online:
                 w["big"].config(text="대기 —")
             else:
