@@ -235,6 +235,25 @@ def done_ids(day_node, room):
     return sorted(k for k, v in d.items() if isinstance(v, dict))
 
 
+def legacy_apply(cur, event, path, data):
+    """이전 버전 오늘 기록 [7] 수신용 (리스트도 dict로 보관)"""
+    def to_dict(x):
+        if isinstance(x, list):
+            return {str(i): v for i, v in enumerate(x) if v is not None}
+        return x if isinstance(x, dict) else {}
+    if path.strip("/") == "" and event == "put":
+        return to_dict(data)
+    return mirror_apply(to_dict(cur), event, path, data)
+
+
+def legacy_counts(cur):
+    out = [0] * len(NAMES)
+    for k, v in (cur or {}).items():
+        if str(k).isdigit() and int(k) < len(NAMES) and isinstance(v, int):
+            out[int(k)] = v
+    return out
+
+
 def summary_text(counts):
     parts = ["%s %d" % (NAMES[i], c) for i, c in enumerate(counts) if c]
     return " · ".join(parts) if parts else "업무 기록 없음"
@@ -271,6 +290,69 @@ class Runner:
 
     def close(self):
         self.pool.shutdown(wait=False, cancel_futures=True)
+
+
+# ---------- 알림음 ----------
+SOUNDS = {
+    "딩동": [(988, 0.25), (784, 0.45)],
+    "딩동댕": [(784, 0.22), (988, 0.22), (1175, 0.45)],
+    "차임 (높은음)": [(1319, 0.18), (1568, 0.18), (2093, 0.4)],
+    "차임 (낮은음)": [(523, 0.25), (659, 0.25), (784, 0.45)],
+    "삐삐삐": [(1000, 0.12), (0, 0.08), (1000, 0.12), (0, 0.08), (1000, 0.12)],
+    "부드러운 종": [(880, 0.9)],
+    "Windows 느낌표": "SystemExclamation",
+    "Windows 알림": "SystemAsterisk",
+    "Windows 경고": "SystemHand",
+}
+DEFAULT_SOUNDS = {"1": "딩동", "2": "차임 (높은음)"}
+
+
+def sound_file(name):
+    """음 목록을 wav 파일로 만들어 경로 반환 (한 번만 생성)"""
+    import wave, math, struct
+    notes = SOUNDS.get(name)
+    if not isinstance(notes, list):
+        return None
+    import hashlib
+    path = DATA_DIR / "sounds" / ("%s.wav" % hashlib.md5(name.encode("utf-8")).hexdigest()[:10])
+    if path.exists():
+        return path
+    rate, frames = 22050, bytearray()
+    for freq, dur in notes:
+        n = int(rate * dur)
+        for k in range(n):
+            if freq:
+                env = min(1.0, k / (rate * 0.01)) * math.exp(-3.0 * k / n)
+                v = env * (0.6 * math.sin(2 * math.pi * freq * k / rate) +
+                           0.2 * math.sin(4 * math.pi * freq * k / rate))
+            else:
+                v = 0.0
+            frames += struct.pack("<h", int(max(-1, min(1, v)) * 30000))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(bytes(frames))
+    return path
+
+
+def play_sound(name):
+    if sys.platform == "win32":
+        try:
+            import winsound
+            alias = SOUNDS.get(name)
+            if isinstance(alias, str):
+                winsound.PlaySound(alias, winsound.SND_ALIAS | winsound.SND_ASYNC)
+            else:
+                winsound.PlaySound(str(sound_file(name)), winsound.SND_FILENAME | winsound.SND_ASYNC)
+            return
+        except Exception:
+            pass
+    try:
+        tk._default_root.bell()
+    except Exception:
+        pass
 
 
 def play_alert():
@@ -328,7 +410,7 @@ class StatsWindow:
         self.data = None
         self.win = tk.Toplevel(parent)
         self.win.title("월별 진료 기록")
-        self.win.geometry("760x600")
+        self.win.geometry("780x680")
         self.win.attributes("-topmost", topmost)
         bar = tk.Frame(self.win, padx=10, pady=8)
         bar.pack(fill="x")
@@ -337,24 +419,9 @@ class StatsWindow:
         self.title.pack(side="left", expand=True)
         tk.Button(bar, text="다음 ▶", command=lambda: self.move(1)).pack(side="right")
         tk.Button(bar, text="이번 달", command=self.this_month).pack(side="right", padx=6)
-        cols = ["day"]
-        for r in rooms:
-            cols += ["p" + r, "t" + r]
-        if len(rooms) > 1:
-            cols.append("sum")
-        self.tree = ttk.Treeview(self.win, columns=cols, show="headings", height=14)
-        self.tree.heading("day", text="날짜")
-        self.tree.column("day", width=110, anchor="center")
-        for r in rooms:
-            self.tree.heading("p" + r, text="진료실%s 완료" % r)
-            self.tree.heading("t" + r, text="진료실%s 업무" % r)
-            self.tree.column("p" + r, width=110, anchor="center")
-            self.tree.column("t" + r, width=110, anchor="center")
-        if len(rooms) > 1:
-            self.tree.heading("sum", text="완료 합계")
-            self.tree.column("sum", width=100, anchor="center")
-        self.tree.pack(fill="both", expand=True, padx=10)
-        self.tree.bind("<<TreeviewSelect>>", self.show_day)
+        self.cal = tk.Frame(self.win, padx=10)
+        self.cal.pack(fill="both", expand=True)
+        self.selected = None
         self.detail = tk.Label(self.win, justify="left", anchor="w", font=(FONT, 9),
                                fg="#344765", wraplength=730)
         self.detail.pack(fill="x", padx=10, pady=(6, 0))
@@ -382,7 +449,8 @@ class StatsWindow:
         self.title.config(text="%d년 %d월" % (self.month.year, self.month.month))
         self.summary.config(text="불러오는 중…")
         self.detail.config(text="")
-        self.tree.delete(*self.tree.get_children())
+        self.days = {}
+        self.render_calendar()
 
         def fetch():
             ev = self.db.get("days", {"orderBy": '"$key"', "startAt": '"%s-01"' % ym,
@@ -432,22 +500,15 @@ class StatsWindow:
                         d[r][0] += c   # 이전 버전: 업무 1건 = 진료 완료 1명
                 d[r][2] = True
         self.days = days
-        self.rows = []
         totals = {r: [0, [0] * len(NAMES)] for r in self.rooms}
         any_legacy = False
-        for day in sorted(days):
-            vals = [day[5:].replace("-", "/") + " (%s)" % "월화수목금토일"[date.fromisoformat(day).weekday()]]
-            psum = 0
+        for day in days:
             for r in self.rooms:
                 p, t, lg = days[day][r]
                 any_legacy = any_legacy or lg
-                vals += [str(p) + ("*" if lg else ""), str(sum(t)) + ("*" if lg else "")]
-                psum += p
                 totals[r][0] += p
                 totals[r][1] = [a + b for a, b in zip(totals[r][1], t)]
-            if len(self.rooms) > 1:
-                vals.append(psum)
-            self.tree.insert("", "end", iid=day, values=vals)
+        self.render_calendar()
         lines = []
         for r in self.rooms:
             p, t = totals[r]
@@ -462,15 +523,52 @@ class StatsWindow:
         self.summary.config(text="\n".join(lines))
         self.totals = totals
 
-    def show_day(self, _e=None):
-        sel = self.tree.selection()
-        if not sel:
+    def render_calendar(self):
+        import calendar
+        for w in self.cal.winfo_children():
+            w.destroy()
+        y, m = self.month.year, self.month.month
+        for col, wd in enumerate("월화수목금토일"):
+            tk.Label(self.cal, text=wd, font=(FONT, 10, "bold"),
+                     fg="#b34545" if col == 6 else ("#2a5db0" if col == 5 else "#46566c")).grid(
+                row=0, column=col, sticky="nsew")
+            self.cal.grid_columnconfigure(col, weight=1, uniform="d")
+        today_s = today()
+        for wi, week in enumerate(calendar.monthcalendar(y, m), 1):
+            self.cal.grid_rowconfigure(wi, weight=1, uniform="w")
+            for col, d in enumerate(week):
+                if not d:
+                    continue
+                day = "%04d-%02d-%02d" % (y, m, d)
+                info = self.days.get(day)
+                lines = [str(d)]
+                if info:
+                    if len(self.rooms) > 1:
+                        for r in self.rooms:
+                            p = info[r][0]
+                            lines.append("%s실 %d명%s" % (r, p, "*" if info[r][2] else ""))
+                    else:
+                        r = self.rooms[0]
+                        lines.append("%d명%s" % (info[r][0], "*" if info[r][2] else ""))
+                bg = "#fff3d6" if day == self.selected else ("#e2efff" if day == today_s else "#f7f9fd")
+                tk.Button(self.cal, text="\n".join(lines), justify="left", anchor="nw",
+                          font=(FONT, 9), bg=bg, relief="groove", bd=1,
+                          fg="#18263b" if info else "#9aa6b8",
+                          command=lambda day=day: self.show_day(day)).grid(
+                    row=wi, column=col, sticky="nsew", padx=1, pady=1)
+
+    def show_day(self, day):
+        self.selected = day
+        self.render_calendar()
+        info = self.days.get(day)
+        if not info:
+            self.detail.config(text="%s 기록 없음" % day)
             return
-        day = sel[0]
         lines = []
         for r in self.rooms:
-            p, t, _ = self.days[day][r]
-            lines.append("%s 진료실 %s: 진료 완료 %d명 · %s" % (day, r, p, summary_text(t)))
+            p, t, lg = info[r]
+            lines.append("%s 진료실 %s: 진료 완료 %d명 · %s%s" % (day, r, p, summary_text(t),
+                                                           "  (이전 버전 기록 포함)" if lg else ""))
         self.detail.config(text="\n".join(lines))
 
     def export_daily(self):
@@ -529,6 +627,70 @@ class StatsWindow:
             messagebox.showinfo("저장 완료", "CSV 파일을 저장했습니다.", parent=self.win)
 
         self.runner.submit(fetch, write, lambda e: messagebox.showerror("실패", str(e), parent=self.win))
+class TaskDetail:
+    """업무 하나의 상세: 오늘/이번 달/올해 건수, 마지막 기록, 오늘 시각 목록"""
+
+    def __init__(self, parent, db, runner, room, task, topmost=True):
+        self.win = tk.Toplevel(parent)
+        self.win.title("진료실 %s · %s" % (room, NAMES[task]))
+        self.win.geometry("380x440")
+        self.win.attributes("-topmost", topmost)
+        tk.Label(self.win, text="진료실 %s · %s" % (room, NAMES[task]), font=(FONT, 13, "bold")).pack(
+            anchor="w", padx=14, pady=(12, 4))
+        self.info = tk.Label(self.win, text="불러오는 중…", justify="left", anchor="w", font=(FONT, 11))
+        self.info.pack(fill="x", padx=14)
+        tk.Label(self.win, text="오늘 기록 시각", font=(FONT, 9, "bold"), fg="#46566c").pack(
+            anchor="w", padx=14, pady=(10, 2))
+        self.lb = tk.Listbox(self.win, font=(FONT, 10), height=10)
+        self.lb.pack(fill="both", expand=True, padx=14, pady=(0, 12))
+        y = date.today().year
+
+        def fetch():
+            days = db.get("days", {"orderBy": '"$key"', "startAt": '"%d-01-01"' % y,
+                                   "endAt": '"%d-12-31"' % y}) or {}
+            legacy = db.get("legacy/" + room) or {}
+            return days, legacy
+
+        def show(res):
+            if not self.win.winfo_exists():
+                return
+            days, legacy = res
+            d0, m0, y0 = today(), today()[:7], str(y)
+            cnt = {"d": 0, "m": 0, "y": 0}
+            last, times = None, []
+            for day, node in days.items():
+                for e in (dig(node, "events") or {}).values():
+                    if isinstance(e, dict) and e.get("room") == room and e.get("task") == task:
+                        stamp = (day, e.get("time", ""))
+                        last = max(last, stamp) if last else stamp
+                        cnt["y"] += 1
+                        cnt["m"] += day.startswith(m0)
+                        if day == d0:
+                            cnt["d"] += 1
+                            times.append(e.get("time", ""))
+            for day, v in legacy.items():
+                if not day.startswith(y0):
+                    continue
+                c = legacy_counts(legacy_apply({}, "put", "/", v))[task]
+                if c:
+                    cnt["y"] += c
+                    cnt["m"] += c if day.startswith(m0) else 0
+                    cnt["d"] += c if day == d0 else 0
+                    if not last or day > last[0]:
+                        last = (day, "")
+            if last:
+                wd = "월화수목금토일"[date.fromisoformat(last[0]).weekday()]
+                last_txt = "%s (%s) %s" % (last[0], wd, last[1][:5])
+            else:
+                last_txt = "기록 없음"
+            self.info.config(text="오늘  %d명\n이번 달  %d명\n올해  %d명\n마지막  %s"
+                                  % (cnt["d"], cnt["m"], cnt["y"], last_txt))
+            for t in sorted(times, reverse=True):
+                self.lb.insert(tk.END, t)
+            if not times:
+                self.lb.insert(tk.END, "오늘 기록 없음")
+
+        runner.submit(fetch, show, lambda e: self.info.config(text="불러오기 실패: %s" % e))
 # ===== 공통 모듈 끝 =====
 
 # ===== 데스크 프로그램 =====
@@ -545,8 +707,8 @@ class DeskApp:
             save_json(CONFIG_FILE, self.cfg)
         self.root = tk.Tk()
         self.root.title("데스크 · 대기/호출 " + VERSION)
-        self.root.geometry(self.cfg.get("geometry") or "540x700+80+60")
-        self.root.minsize(500, 640)
+        self.root.geometry(self.cfg.get("geometry") or "660x640+80+60")
+        self.root.minsize(600, 560)
         self.root.configure(bg=BG)
         self.top_var = tk.BooleanVar(master=self.root, value=self.cfg.get("topmost", True))
         self.root.attributes("-topmost", self.top_var.get())
@@ -556,6 +718,7 @@ class DeskApp:
         self.streams = []
         self.live = {}
         self.events = {}
+        self.legacy = {r: {} for r in ROOMS}
         self.events_day = None
         self.online = False
         self.last_call = {r: None for r in ROOMS}
@@ -596,8 +759,11 @@ class DeskApp:
         for s in self.streams:
             s.stop()
         self.events_day = today()
+        self.legacy = {r: {} for r in ROOMS}
         self.streams = [Stream(self.db, "live", self.inbox, "live"),
                         Stream(self.db, "days/" + self.events_day, self.inbox, "events")]
+        self.streams += [Stream(self.db, "legacy/%s/%s" % (r, self.events_day), self.inbox, "legacy" + r)
+                         for r in ROOMS]
         for s in self.streams:
             s.start()
 
@@ -615,7 +781,10 @@ class DeskApp:
                     self.set_status("● 실시간 연결됨", "#21804c")
                 if ev == "alive":
                     continue
-                if tag == "live":
+                if tag.startswith("legacy"):
+                    r = tag[6:]
+                    self.legacy[r] = legacy_apply(self.legacy.get(r), ev, path, data)
+                elif tag == "live":
                     self.live = mirror_apply(self.live, ev, path, data)
                 else:
                     self.events = mirror_apply(self.events, ev, path, data)
@@ -651,31 +820,45 @@ class DeskApp:
             tk.Radiobutton(mine, text=label, variable=self.mode, value=value, bg="#fff8e6",
                            font=(FONT, 10), command=self.set_mode).pack(side="left", padx=4)
 
-        for r in ROOMS:
-            box = tk.Frame(f, bg="#eaf2fc", padx=12, pady=9)
-            box.pack(fill="x", pady=5)
+        cols = tk.Frame(f, bg=BG)
+        cols.pack(fill="both", expand=True)
+        for ci, r in enumerate(ROOMS):
+            cols.grid_columnconfigure(ci, weight=1, uniform="room")
+            box = tk.Frame(cols, bg="#eaf2fc", padx=10, pady=8)
+            box.grid(row=0, column=ci, sticky="nsew", padx=(0, 6) if ci == 0 else (6, 0))
             head = tk.Frame(box, bg="#eaf2fc")
             head.pack(fill="x")
-            tk.Label(head, text="진료실 " + r, bg="#eaf2fc", font=(FONT, 13, "bold")).pack(side="left")
-            own = tk.Label(head, bg="#eaf2fc", font=(FONT, 9))
+            tk.Label(head, text="진료실 " + r, bg="#eaf2fc", font=(FONT, 14, "bold")).pack(side="left")
+            own = tk.Label(head, bg="#eaf2fc", font=(FONT, 8))
             own.pack(side="right")
-            big = tk.Label(box, bg="#eaf2fc", fg="#1d62b2", font=(FONT, 20, "bold"), anchor="w")
+            big = tk.Label(box, bg="#eaf2fc", fg="#1d62b2", font=(FONT, 22, "bold"), anchor="w")
             big.pack(fill="x", pady=(2, 0))
-            tasks = tk.Label(box, bg="#eaf2fc", fg="#3d4e66", font=(FONT, 9), anchor="w",
-                             justify="left", wraplength=480)
-            tasks.pack(fill="x")
-            call = tk.Label(box, bg="#eaf2fc", fg="#56647b", font=(FONT, 10), anchor="w")
-            call.pack(fill="x", pady=(3, 6))
+            done = tk.Label(box, bg="#eaf2fc", fg="#24824d", font=(FONT, 12, "bold"), anchor="w")
+            done.pack(fill="x")
+            call = tk.Label(box, bg="#eaf2fc", fg="#56647b", font=(FONT, 9), anchor="w",
+                            justify="left", wraplength=280)
+            call.pack(fill="x", pady=(2, 5))
             btns = tk.Frame(box, bg="#eaf2fc")
             btns.pack(fill="x")
-            tk.Button(btns, text="＋ 대기 등록", bg="#cfe3ff", width=16, font=(FONT, 12, "bold"),
-                      command=lambda r=r: self.add(r)).pack(side="left", padx=(0, 8))
-            tk.Button(btns, text="− 등록 취소", bg="#f1f2f5", font=(FONT, 10),
-                      command=lambda r=r: self.remove(r)).pack(side="left")
-            ack = tk.Button(btns, text="호출 확인", bg="#ffcf9e", font=(FONT, 10, "bold"),
+            tk.Button(btns, text="＋ 대기 등록", bg="#cfe3ff", font=(FONT, 12, "bold"),
+                      command=lambda r=r: self.add(r)).pack(side="left", fill="x", expand=True)
+            tk.Button(btns, text="− 취소", bg="#f1f2f5", font=(FONT, 10),
+                      command=lambda r=r: self.remove(r)).pack(side="left", padx=(5, 0))
+            ack = tk.Button(box, text="호출 확인", bg="#ffcf9e", font=(FONT, 11, "bold"),
                             command=lambda r=r: self.ack(r))
-            self.w[r] = {"box": box, "own": own, "big": big, "tasks": tasks, "call": call,
-                         "ack": ack, "head": head, "btns": btns}
+            tl = tk.Frame(box, bg="#eaf2fc")
+            tl.pack(fill="x", pady=(8, 0))
+            tk.Label(tl, text="업무별 (누르면 상세)", bg="#eaf2fc", fg="#65738a",
+                     font=(FONT, 8)).pack(anchor="w")
+            rows = []
+            for i, name in enumerate(NAMES):
+                lab = tk.Label(tl, bg="white", fg="#22324a", font=(FONT, 9), anchor="w",
+                               padx=6, cursor="hand2")
+                lab.pack(fill="x", pady=1)
+                lab.bind("<Button-1>", lambda e, r=r, i=i: self.task_detail(r, i))
+                rows.append(lab)
+            self.w[r] = {"box": box, "own": own, "big": big, "done": done, "call": call,
+                         "ack": ack, "head": head, "btns": btns, "tl": tl, "rows": rows}
 
         bottom = tk.Frame(f, bg=BG)
         bottom.pack(fill="x", side="bottom")
@@ -720,13 +903,17 @@ class DeskApp:
             w = self.w[r]
             node = dig(self.live, "rooms", r) or {}
             waiting = len(tickets_today(node))
-            counts = task_counts(self.events, r)
+            counts = [a + b for a, b in zip(task_counts(self.events, r),
+                                            legacy_counts(getattr(self, "legacy", {}).get(r)))]
             patients = len(done_ids(self.events, r)) + sum(counts)
             if self.db is None or not self.live and not self.online:
                 w["big"].config(text="대기 —")
             else:
-                w["big"].config(text="대기 %d명      진료 완료 %d명" % (waiting, patients))
-            w["tasks"].config(text=summary_text(counts))
+                w["big"].config(text="대기 %d명" % waiting)
+            w["done"].config(text="오늘 진료 완료 %d명" % patients)
+            for i, lab in enumerate(w["rows"]):
+                lab.config(text="%s   %d" % (NAMES[i], counts[i]),
+                           fg="#22324a" if counts[i] else "#9aa6b8")
             call = node.get("call") if isinstance(node.get("call"), dict) else None
             if call and call.get("d") == today():
                 mins = self.minutes_since(call.get("time", ""))
@@ -742,23 +929,21 @@ class DeskApp:
                 w["own"].config(text="담당 없음 → 모든 데스크에 알림", fg="#bd4429")
             alert = r in self.unacked
             color = "#ffe2c4" if alert else "#eaf2fc"
-            for key in ("box", "head", "btns"):
+            for key in ("box", "head", "btns", "tl", "own", "big", "done", "call"):
                 w[key].config(bg=color)
-            for key in ("own", "big", "tasks", "call"):
-                w[key].config(bg=color)
-            for child in w["head"].winfo_children():
+            for child in list(w["head"].winfo_children()) + list(w["tl"].winfo_children())[:1]:
                 child.config(bg=color)
-            w["call"].config(text=("🔔 호출됨 — 환자 안내 후 '호출 확인'  |  " if alert else "") + txt,
+            w["call"].config(text=("🔔 호출됨! 환자 안내 후 '호출 확인'\n" if alert else "") + txt,
                              fg="#bd4429" if alert else "#56647b")
             if alert:
-                w["ack"].pack(side="right")
+                w["ack"].pack(fill="x", pady=(5, 0), after=w["btns"])
             else:
                 w["ack"].pack_forget()
 
         if time.time() > self.assign_hold:
             mine = [r for r in ROOMS if dig(self.live, "assign", r) == self.cfg["id"]]
             self.mode.set("both" if len(mine) == 2 else (mine[0] if mine else ""))
-        self.w["foot"].config(text="다른 데스크가 같은 진료실을 고르면 그쪽으로 넘어갑니다. 담당이 없으면 모든 데스크에 알림.")
+        self.w["foot"].config(text="담당이 없으면 모든 데스크에 알림이 갑니다.")
 
     @staticmethod
     def minutes_since(hms):
@@ -866,8 +1051,11 @@ class DeskApp:
 
     def alert(self, r, when, unowned):
         self.unacked.add(r)
-        play_alert()
-        self.root.after(1500, play_alert)
+        snd = self.cfg.get("sound" + r) or DEFAULT_SOUNDS[r]
+        rep = int(self.cfg.get("repeat", 2))
+        play_sound(snd)
+        for k in range(1, rep):
+            self.root.after(1600 * k, lambda snd=snd: play_sound(snd))
         old = self.popups.pop(r, None)
         if old is not None:
             try:
@@ -904,6 +1092,11 @@ class DeskApp:
         self.render()
 
     # ---------- 설정 / 통계 ----------
+    def task_detail(self, r, i):
+        if not self.need_db():
+            return
+        TaskDetail(self.root, self.db, self.runner, r, i, self.top_var.get())
+
     def stats(self):
         if not self.need_db():
             return
@@ -954,6 +1147,22 @@ class DeskApp:
         tk.Label(win, text="처음 한 번만 '새 연결 키 만들기'를 하고,\n나머지 PC에는 그 키를 복사해 붙여넣으세요.",
                  fg="#65738a", font=(FONT, 8), justify="left").pack(**pad)
 
+        tk.Label(win, text="호출 알림음 (진료실마다 다르게)", font=(FONT, 10, "bold")).pack(pady=(14, 2), **pad)
+        svars = {}
+        for r in ROOMS:
+            row2 = tk.Frame(win)
+            row2.pack(pady=2, **pad)
+            tk.Label(row2, text="진료실 %s" % r, width=8, anchor="w").pack(side="left")
+            v = tk.StringVar(master=win, value=self.cfg.get("sound" + r) or DEFAULT_SOUNDS[r])
+            svars[r] = v
+            ttk.Combobox(row2, textvariable=v, values=list(SOUNDS), state="readonly", width=18).pack(side="left")
+            tk.Button(row2, text="▶ 미리 듣기", command=lambda v=v: play_sound(v.get())).pack(side="left", padx=6)
+        row3 = tk.Frame(win)
+        row3.pack(pady=2, **pad)
+        tk.Label(row3, text="반복 횟수", width=8, anchor="w").pack(side="left")
+        rep = tk.StringVar(master=win, value=str(self.cfg.get("repeat", 2)))
+        ttk.Combobox(row3, textvariable=rep, values=["1", "2", "3"], state="readonly", width=4).pack(side="left")
+
         def save():
             k = key.get().strip()
             if k:
@@ -964,6 +1173,9 @@ class DeskApp:
                     return
             changed = k != self.cfg.get("key", "")
             self.cfg["name"] = name.get().strip() or "데스크"
+            for r, v in svars.items():
+                self.cfg["sound" + r] = v.get()
+            self.cfg["repeat"] = int(rep.get())
             self.cfg["key"] = k
             save_json(CONFIG_FILE, self.cfg)
             win.destroy()
