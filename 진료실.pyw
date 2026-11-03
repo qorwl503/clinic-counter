@@ -386,9 +386,6 @@ SOUNDS = {
     "차임 (낮은음)": [(523, 0.25), (659, 0.25), (784, 0.45)],
     "삐삐삐": [(1000, 0.12), (0, 0.08), (1000, 0.12), (0, 0.08), (1000, 0.12)],
     "부드러운 종": [(880, 0.9)],
-    "Windows 느낌표": "SystemExclamation",
-    "Windows 알림": "SystemAsterisk",
-    "Windows 경고": "SystemHand",
 }
 DEFAULT_SOUNDS = {"1": "딩동", "2": "딩동 (낮게)", "staff1": "딩동 두 번", "staff2": "딩동 두 번 (낮게)",
                   "staff": "딩동 두 번", "msg": "무음"}
@@ -451,6 +448,8 @@ def sound_file(name):
 def play_sound(name):
     if name == "무음":
         return
+    if name not in SOUNDS:      # 예전에 고른 소리가 없어졌으면 기본 딩동
+        name = "딩동"
     if sys.platform == "win32":
         try:
             import winsound
