@@ -376,6 +376,8 @@ def msg_text(label):
     label = (label or "").strip()
     if label in ("", "대기", "환자 대기"):
         return "과장님, 환자 대기중입니다"
+    if not label.endswith("상담"):
+        label += " 상담"
     return "과장님, %s 대기중입니다" % label
 
 
@@ -1438,7 +1440,7 @@ class DeskApp:
         tk.Label(win, text="과장님께 알림 버튼 (쉼표로 구분)", font=(FONT, 10, "bold")).pack(pady=(14, 2), **pad)
         mbv = tk.StringVar(master=win, value=", ".join(self.cfg.get("msg_buttons") or DEFAULT_MSG_BUTTONS))
         tk.Entry(win, textvariable=mbv, width=50, font=(FONT, 10)).pack(**pad)
-        tk.Label(win, text="예: 대기, 폐암사후, 종검결과 → 진료실에 '과장님, 폐암사후 대기중입니다'로 표시 (저장 후 다시 켜면 반영)",
+        tk.Label(win, text="예: 대기, 폐암사후, 종검결과 → 진료실에 '과장님, 폐암사후 상담 대기중입니다'로 표시 (저장 후 다시 켜면 반영)",
                  fg="#65738a", font=(FONT, 8)).pack(**pad)
         row3 = tk.Frame(win)
         row3.pack(pady=2, **pad)

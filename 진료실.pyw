@@ -376,6 +376,8 @@ def msg_text(label):
     label = (label or "").strip()
     if label in ("", "대기", "환자 대기"):
         return "과장님, 환자 대기중입니다"
+    if not label.endswith("상담"):
+        label += " 상담"
     return "과장님, %s 대기중입니다" % label
 
 
