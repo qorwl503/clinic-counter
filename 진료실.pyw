@@ -426,6 +426,7 @@ class StatsWindow:
                 for i, c in enumerate(counts[:len(NAMES)]):
                     if isinstance(c, int):
                         d[r][1][i] += c
+                        d[r][0] += c   # 이전 버전: 업무 1건 = 진료 완료 1명
                 d[r][2] = True
         self.days = days
         self.rows = []
@@ -437,7 +438,7 @@ class StatsWindow:
             for r in self.rooms:
                 p, t, lg = days[day][r]
                 any_legacy = any_legacy or lg
-                vals += [p, str(sum(t)) + ("*" if lg else "")]
+                vals += [str(p) + ("*" if lg else ""), str(sum(t)) + ("*" if lg else "")]
                 psum += p
                 totals[r][0] += p
                 totals[r][1] = [a + b for a, b in zip(totals[r][1], t)]
@@ -452,7 +453,7 @@ class StatsWindow:
             if busy:
                 lines.append("    시간대별 진료 완료: " + " · ".join(busy))
         if any_legacy:
-            lines.append("* 이전 버전(v12) 기록 포함 — 업무 건수만 있고 진료 완료 인원은 없습니다.")
+            lines.append("* 이전 버전(v12) 기록 포함 — 업무 건수를 진료 완료 인원으로 함께 계산했습니다.")
         if not days:
             lines = ["이 달 기록이 없습니다."]
         self.summary.config(text="\n".join(lines))
