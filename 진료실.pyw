@@ -1111,7 +1111,9 @@ class DoctorApp:
         self.w["net"].pack(fill="x")
 
         board = tk.Frame(o, bg="#eaf2fc", padx=10, pady=8)
-        board.pack(fill="x", pady=(5, 5))
+        board.pack(fill="x", pady=(5, 0))
+        self.w["board"] = board
+        self.w["waitinfo"] = tk.Label(o, bg=BG, font=(FONT, 11, "bold"), anchor="w", padx=8)
         self.w["wait"] = tk.Label(board, bg="#eaf2fc", fg="#17539b", font=(FONT, 20, "bold"))
         self.w["wait"].pack(side="left")
         self.w["done"] = tk.Label(board, bg="#eaf2fc", fg="#24824d", font=(FONT, 13, "bold"))
@@ -1195,6 +1197,29 @@ class DoctorApp:
         self.w["wait"].config(text=("대기 %d명" % w) if connected else "대기 —",
                               fg="#17539b" if self.online else "#9aa6b8")
         self.w["done"].config(text="진료 완료 %d명" % completed)
+        # 대기 시간 알림: 첫 대기 환자가 5분 넘으면 주황, 10분 넘으면 빨강
+        q = self.room_node.get("queue") if isinstance(self.room_node, dict) else None
+        mins = []
+        for t in tickets_today(self.room_node):
+            m = call_age({"d": today(), "time": (q or {}).get(t, {}).get("t", "")})
+            if m < 10 ** 8:
+                mins.append(int(m // 60))
+        top = mins[0] if mins and self.online else None
+        if top is not None and top >= 5:
+            red = top >= 10
+            more = " · ".join("%d분" % m for m in mins[1:4])
+            self.w["waitinfo"].config(
+                text="%s 대기 %d분째%s" % ("🔴" if red else "🟠", top, ("  (다음: %s)" % more) if more else ""),
+                fg="white", bg="#c0392b" if red else "#e08a1e")
+            self.w["waitinfo"].pack(fill="x", pady=(0, 5), after=self.w["board"])
+            self.w["board"].config(bg="#fde3df" if red else "#fff0d9")
+            for c in self.w["board"].winfo_children():
+                c.config(bg="#fde3df" if red else "#fff0d9")
+        else:
+            self.w["waitinfo"].pack_forget()
+            self.w["board"].config(bg="#eaf2fc")
+            for c in self.w["board"].winfo_children():
+                c.config(bg="#eaf2fc")
         self.w["next"].pack_forget()
         if self.recall_mode():
             self.w["call"].config(text="🔁 다시 호출 (데스크 확인 전)", bg="#ffe9b8", fg="#6b4a00")
@@ -1608,5 +1633,10 @@ class DoctorApp:
 
 
 if __name__ == "__main__":
-    auto_update("room")
-    DoctorApp().root.mainloop()
+    app = DoctorApp()
+    if os.environ.get("CLINIC_SELFTEST"):
+        app.root.update()
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        (DATA_DIR / "selftest_room.txt").write_text("ok " + BUILD_VERSION, encoding="utf-8")
+        os._exit(0)
+    app.root.mainloop()

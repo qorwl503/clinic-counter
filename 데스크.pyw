@@ -1052,7 +1052,6 @@ class DeskApp:
             big.pack(fill="x", pady=(2, 0))
             waitinfo = tk.Label(box, bg="#eaf2fc", fg="#56647b", font=(FONT, 10, "bold"), anchor="w",
                                 justify="left")
-            waitinfo.pack(fill="x")
             done = tk.Label(box, bg="#eaf2fc", fg="#24824d", font=(FONT, 12, "bold"), anchor="w")
             done.pack(fill="x")
             call = tk.Label(box, bg="#eaf2fc", fg="#56647b", font=(FONT, 9), anchor="w",
@@ -1150,18 +1149,6 @@ class DeskApp:
             else:
                 w["big"].config(text="대기 %d명" % waiting)
             w["done"].config(text="오늘 진료 완료 %d명" % patients)
-            # 대기 시간: 먼저 온 순서대로 몇 분째인지
-            q = (node.get("queue") or {}) if isinstance(node.get("queue"), dict) else {}
-            mins = [self.minutes_since(q[t].get("t", "")) for t in tickets_today(node)]
-            mins = [m for m in mins if m is not None]
-            if mins:
-                top = mins[0]
-                more = " · ".join("%d분" % m for m in mins[1:4]) + (" …" if len(mins) > 4 else "")
-                w["waitinfo"].config(
-                    text="⏱ 첫 대기 %d분째%s" % (top, ("   (다음: %s)" % more) if more else ""),
-                    fg="#c0392b" if top >= 10 else ("#c77923" if top >= 5 else "#56647b"))
-            else:
-                w["waitinfo"].config(text="", fg="#56647b")
             stale = not self.online
             w["big"].config(fg="#9aa6b8" if stale else "#1d62b2")
             w["done"].config(fg="#9aa6b8" if stale else "#24824d")
@@ -1656,5 +1643,10 @@ class DeskApp:
 
 
 if __name__ == "__main__":
-    auto_update("desk")
-    DeskApp().root.mainloop()
+    app = DeskApp()
+    if os.environ.get("CLINIC_SELFTEST"):
+        app.root.update()
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        (DATA_DIR / "selftest_desk.txt").write_text("ok " + BUILD_VERSION, encoding="utf-8")
+        os._exit(0)
+    app.root.mainloop()
