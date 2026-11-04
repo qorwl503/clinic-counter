@@ -24,6 +24,11 @@ jobs:
           pyinstaller --noconfirm --onedir --noconsole --name desk desk.pyw
           pyinstaller --noconfirm --onedir --noconsole --name room room.pyw
           pyinstaller --noconfirm --onedir --noconsole --name launcher launcher.pyw
+          foreach ($d in @("dist/desk/_internal", "dist/room/_internal", "dist/launcher/_internal")) {
+            foreach ($s in @("_tcl_data/tzdata", "_tcl_data/msgs", "_tk_data/msgs", "_tk_data/images", "_tk_data/demos")) {
+              if (Test-Path "$d/$s") { Remove-Item "$d/$s" -Recurse -Force }
+            }
+          }
           New-Item -ItemType Directory -Force "app_pkg/$v" | Out-Null
           Copy-Item dist/desk "app_pkg/$v/desk" -Recurse
           Copy-Item dist/room "app_pkg/$v/room" -Recurse
