@@ -29,6 +29,8 @@ jobs:
           Copy-Item "사용방법.txt" out/
           Copy-Item dist/desk.exe out/desk.exe
           Copy-Item dist/room.exe out/room.exe
+          Copy-Item dist/desk.exe "out/desk-$v.exe"
+          Copy-Item dist/room.exe "out/room-$v.exe"
           Set-Content out/version.txt $v -NoNewline -Encoding ASCII
       - name: 단축키 시험
         continue-on-error: true
@@ -46,7 +48,7 @@ jobs:
           git checkout --orphan build
           git rm -rf --cached . | Out-Null
           Copy-Item out/* . -Force
-          git add "데스크.exe" "진료실.exe" "사용방법.txt" desk.exe room.exe version.txt
+          git add "데스크.exe" "진료실.exe" "사용방법.txt" desk.exe room.exe "desk-$env:GITHUB_SHA.exe" "room-$env:GITHUB_SHA.exe" version.txt
           if (Test-Path hotkey_test.txt) { git add hotkey_test.txt }
           git commit -m "exe build $env:GITHUB_SHA"
           git push -f origin build
