@@ -1022,7 +1022,7 @@ class DeskApp:
 
         mine = tk.Frame(f, bg="#fff8e6", padx=10, pady=7)
         mine.pack(fill="x", pady=(0, 6))
-        tk.Label(mine, text="내 담당:", bg="#fff8e6", font=(FONT, 10, "bold")).pack(side="left")
+        tk.Label(mine, text="알람 받기:", bg="#fff8e6", font=(FONT, 10, "bold")).pack(side="left")
         saved = self.cfg.get("my_rooms")
         if saved is None:   # 이전 버전 설정 이어받기
             v = self.cfg.get("view", "")
@@ -1033,7 +1033,9 @@ class DeskApp:
             self.sel[r] = var
             tk.Checkbutton(mine, text="진료실 " + r, variable=var, bg="#fff8e6", font=(FONT, 10, "bold"),
                            command=self.set_mode).pack(side="left", padx=4)
-        tk.Label(mine, text="(둘 다 체크 = 전체)", bg="#fff8e6", fg="#7a6a3a", font=(FONT, 8)).pack(side="left")
+        self.show_all = tk.BooleanVar(master=self.root, value=bool(self.cfg.get("show_all", False)))
+        tk.Checkbutton(mine, text="화면은 둘 다 보기", variable=self.show_all, bg="#fff8e6", font=(FONT, 9),
+                       command=self.toggle_show_all).pack(side="right")
 
         cols = tk.Frame(f, bg=BG)
         cols.pack(fill="both", expand=True)
@@ -1197,7 +1199,7 @@ class DeskApp:
 
     def apply_layout(self):
         """진료실 1만 담당 → 진료실 1만, 진료실 2만 → 진료실 2만, 전체/미선택 → 둘 다 표시"""
-        show = tuple(self.my_rooms()) or ROOMS
+        show = ROOMS if self.show_all.get() else (tuple(self.my_rooms()) or ROOMS)
         if show == self.layout:
             return
         self.layout = show
@@ -1307,6 +1309,11 @@ class DeskApp:
             self.live = mirror_apply(self.live, "put", "/desks/%s/rooms" % did, rooms)
             db = self.db
             self.runner.submit(lambda: db.put("live/desks/%s/rooms" % did, rooms), fail=self.fail)
+
+    def toggle_show_all(self):
+        self.cfg["show_all"] = bool(self.show_all.get())
+        save_json(CONFIG_FILE, self.cfg)
+        self.apply_layout()
 
     def select(self, rooms):
         """(시험용) 담당 진료실 지정"""
