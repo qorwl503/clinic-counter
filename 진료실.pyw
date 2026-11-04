@@ -1207,9 +1207,8 @@ class DoctorApp:
         top = mins[0] if mins and self.online else None
         if top is not None and top >= 5:
             red = top >= 10
-            more = " · ".join("%d분" % m for m in mins[1:4])
             self.w["waitinfo"].config(
-                text="%s 대기 %d분째%s" % ("🔴" if red else "🟠", top, ("  (다음: %s)" % more) if more else ""),
+                text="%s 대기 %d분째" % ("🔴" if red else "🟠", top),
                 fg="white", bg="#c0392b" if red else "#e08a1e")
             self.w["waitinfo"].pack(fill="x", pady=(0, 5), after=self.w["board"])
             self.w["board"].config(bg="#fde3df" if red else "#fff0d9")
