@@ -131,6 +131,22 @@ def launch():
     return True
 
 
+def hide_internals():
+    """폴더를 깔끔하게: 프로그램 본체 폴더(_internal, app)는 숨김 처리"""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        for d in (HERE / "_internal", APP):
+            if d.exists():
+                attrs = ctypes.windll.kernel32.GetFileAttributesW(str(d))
+                if attrs != -1 and not attrs & 0x2:
+                    ctypes.windll.kernel32.SetFileAttributesW(str(d), attrs | 0x2)
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
+    hide_internals()
     check_update(show=not os.environ.get("CLINIC_LAUNCHER_DRYRUN"))
     launch()
