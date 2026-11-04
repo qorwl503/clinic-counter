@@ -1,4 +1,4 @@
-name: Windows exe 만들기
+name: Windows 프로그램 만들기
 on:
   push:
     branches: [main]
@@ -15,32 +15,50 @@ jobs:
           python-version: "3.12"
       - name: PyInstaller 설치
         run: pip install pyinstaller==6.11.1
-      - name: exe 빌드
+      - name: 빌드 (폴더형 — 임시 폴더 사용 안 함)
         shell: pwsh
         run: |
           $v = $env:GITHUB_SHA
           (Get-Content "데스크.pyw" -Raw -Encoding UTF8) -replace 'BUILD_VERSION = "dev"', "BUILD_VERSION = `"$v`"" | Set-Content desk.pyw -Encoding UTF8
           (Get-Content "진료실.pyw" -Raw -Encoding UTF8) -replace 'BUILD_VERSION = "dev"', "BUILD_VERSION = `"$v`"" | Set-Content room.pyw -Encoding UTF8
-          pyinstaller --onefile --noconsole --name desk desk.pyw
-          pyinstaller --onefile --noconsole --name room room.pyw
-          New-Item -ItemType Directory -Force out | Out-Null
-          Copy-Item dist/desk.exe "out/데스크.exe"
-          Copy-Item dist/room.exe "out/진료실.exe"
-          Copy-Item "사용방법.txt" out/
-          Copy-Item dist/desk.exe out/desk.exe
-          Copy-Item dist/room.exe out/room.exe
-          Copy-Item dist/desk.exe "out/desk-$v.exe"
-          Copy-Item dist/room.exe "out/room-$v.exe"
-          Set-Content out/version.txt $v -NoNewline -Encoding ASCII
-      - name: 단축키 시험
-        continue-on-error: true
+          pyinstaller --noconfirm --onedir --noconsole --name desk desk.pyw
+          pyinstaller --noconfirm --onedir --noconsole --name room room.pyw
+          pyinstaller --noconfirm --onedir --noconsole --name launcher launcher.pyw
+          New-Item -ItemType Directory -Force "app_pkg/$v" | Out-Null
+          Copy-Item dist/desk "app_pkg/$v/desk" -Recurse
+          Copy-Item dist/room "app_pkg/$v/room" -Recurse
+      - name: 실행 시험 (실패하면 배포 안 함)
         shell: pwsh
-        run: python hotkey_test.py *> out/hotkey_test.txt
+        run: |
+          $v = $env:GITHUB_SHA
+          $env:CLINIC_SELFTEST = "1"
+          Start-Process "app_pkg/$v/desk/desk.exe" -Wait
+          Start-Process "app_pkg/$v/room/room.exe" -Wait
+          $d = Get-Content "$env:LOCALAPPDATA/ClinicCounter13/selftest_desk.txt"
+          $r = Get-Content "$env:LOCALAPPDATA/ClinicCounter13/selftest_room.txt"
+          Write-Host "desk: $d / room: $r"
+          if ($d -ne "ok $v" -or $r -ne "ok $v") { throw "self test failed" }
+      - name: 배포 파일 만들기
+        shell: pwsh
+        run: |
+          $v = $env:GITHUB_SHA
+          New-Item -ItemType Directory -Force out | Out-Null
+          Compress-Archive -Path "app_pkg/$v/*" -DestinationPath "out/app-$v.zip"
+          $root = "pkg/진료카운터"
+          New-Item -ItemType Directory -Force "$root/app" | Out-Null
+          Copy-Item dist/launcher/_internal "$root/_internal" -Recurse
+          Copy-Item dist/launcher/launcher.exe "$root/데스크.exe"
+          Copy-Item dist/launcher/launcher.exe "$root/진료실.exe"
+          Copy-Item "app_pkg/$v" "$root/app/$v" -Recurse
+          Set-Content "$root/app/current.txt" $v -NoNewline -Encoding ASCII
+          Copy-Item "사용방법.txt" "$root/"
+          Compress-Archive -Path $root -DestinationPath out/install.zip
+          Set-Content out/version.txt $v -NoNewline -Encoding ASCII
       - uses: actions/upload-artifact@v4
         with:
-          name: 진료카운터-v13
+          name: 진료카운터
           path: out/
-      - name: build 브랜치에 exe 저장
+      - name: build 브랜치에 저장
         shell: pwsh
         run: |
           git config user.name "build-bot"
@@ -48,7 +66,6 @@ jobs:
           git checkout --orphan build
           git rm -rf --cached . | Out-Null
           Copy-Item out/* . -Force
-          git add "데스크.exe" "진료실.exe" "사용방법.txt" desk.exe room.exe "desk-$env:GITHUB_SHA.exe" "room-$env:GITHUB_SHA.exe" version.txt
-          if (Test-Path hotkey_test.txt) { git add hotkey_test.txt }
-          git commit -m "exe build $env:GITHUB_SHA"
+          git add install.zip "app-$env:GITHUB_SHA.zip" version.txt
+          git commit -m "build $env:GITHUB_SHA"
           git push -f origin build
