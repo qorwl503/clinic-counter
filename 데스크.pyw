@@ -1308,7 +1308,10 @@ class DeskApp:
             rooms = {r: True for r in self.my_rooms()} or None
             self.live = mirror_apply(self.live, "put", "/desks/%s/rooms" % did, rooms)
             db = self.db
-            self.runner.submit(lambda: db.put("live/desks/%s/rooms" % did, rooms), fail=self.fail)
+            path = "live/desks/%s/rooms" % did
+            # 아무것도 체크 안 하면 지우기 (빈 내용으로 저장하면 Firebase가 400 오류를 냄)
+            job = (lambda: db.put(path, rooms)) if rooms else (lambda: db.delete(path))
+            self.runner.submit(job, fail=self.fail)
 
     def toggle_show_all(self):
         self.cfg["show_all"] = bool(self.show_all.get())
