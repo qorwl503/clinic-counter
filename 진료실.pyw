@@ -397,7 +397,12 @@ SOUNDS = {
 DEFAULT_SOUNDS = {"1": "딩동", "2": "딩동 (낮게)", "staff1": "딩동 두 번", "staff2": "딩동 두 번 (낮게)",
                   "staff": "딩동 두 번", "msg": "무음"}
 DEFAULT_MSG_BUTTONS = ["대기", "폐암사후", "종검결과"]
-STAFF_ROOM_NO = {"1": "7", "2": "8"}   # 직원 호출 팝업: 진료실 1 → 7번, 진료실 2 → 8번 진료실
+STAFF_ROOM_NO = {"1": "7", "2": "8"}   # 화면 표시: 진료실 1 → 7번 진료실, 진료실 2 → 8번 진료실
+
+
+def room_label(r):
+    """화면에 보이는 진료실 이름 (내부 번호 1·2 → 7번·8번 진료실)"""
+    return "%s번 진료실" % STAFF_ROOM_NO.get(str(r), r)
 
 
 def msg_text(label):
@@ -657,7 +662,7 @@ class StatsWindow:
         lines = []
         for r in self.rooms:
             p, t = totals[r]
-            lines.append("진료실 %s — 진료 완료 %d명, 업무 %d건" % (r, p, sum(t)))
+            lines.append("%s — 진료 완료 %d명, 업무 %d건" % (room_label(r), p, sum(t)))
             lines.append("    " + summary_text(t))
             busy = ["%d시 %d" % (h, n) for h, n in enumerate(hours[r]) if n]
             if busy:
@@ -713,7 +718,7 @@ class StatsWindow:
         lines = []
         for r in self.rooms:
             p, t, lg = info[r]
-            lines.append("%s 진료실 %s: 진료 완료 %d명 · %s%s" % (day, r, p, summary_text(t),
+            lines.append("%s %s: 진료 완료 %d명 · %s%s" % (day, room_label(r), p, summary_text(t),
                                                            "  (이전 버전 기록 포함)" if lg else ""))
         self.detail.config(text="\n".join(lines))
 
@@ -730,7 +735,7 @@ class StatsWindow:
             w = csv.writer(f)
             head = ["날짜"]
             for r in self.rooms:
-                head += ["진료실%s 진료완료" % r] + ["진료실%s %s" % (r, n) for n in NAMES]
+                head += ["%s 진료완료" % room_label(r)] + ["%s %s" % (room_label(r), n) for n in NAMES]
             w.writerow(head)
             for day in sorted(self.days):
                 row = [day]
@@ -778,10 +783,10 @@ class TaskDetail:
 
     def __init__(self, parent, db, runner, room, task, topmost=True):
         self.win = tk.Toplevel(parent)
-        self.win.title("진료실 %s · %s" % (room, NAMES[task]))
+        self.win.title("%s · %s" % (room_label(room), NAMES[task]))
         self.win.geometry("380x440")
         self.win.attributes("-topmost", topmost)
-        tk.Label(self.win, text="진료실 %s · %s" % (room, NAMES[task]), font=(FONT, 13, "bold")).pack(
+        tk.Label(self.win, text="%s · %s" % (room_label(room), NAMES[task]), font=(FONT, 13, "bold")).pack(
             anchor="w", padx=14, pady=(12, 4))
         self.info = tk.Label(self.win, text="불러오는 중…", justify="left", anchor="w", font=(FONT, 11))
         self.info.pack(fill="x", padx=14)
@@ -8655,7 +8660,7 @@ class DoctorApp:
         return len(tickets_today(self.room_node))
 
     def render(self):
-        self.w["title"].config(text="진료실 %s" % self.room)
+        self.w["title"].config(text=room_label(self.room))
         counts = [a + b for a, b in zip(task_counts(self.events, self.room), legacy_counts(self.legacy))]
         done = done_ids(self.events, self.room)
         completed = len(done) + sum(counts)
@@ -9011,7 +9016,7 @@ class DoctorApp:
         rr = tk.Frame(f)
         rr.grid(row=0, column=1, sticky="w")
         for r in ROOMS:
-            tk.Radiobutton(rr, text="진료실 " + r, variable=room, value=r).pack(side="left")
+            tk.Radiobutton(rr, text=room_label(r), variable=room, value=r).pack(side="left")
 
         tk.Label(f, text="연결 키", font=(FONT, 10, "bold")).grid(row=1, column=0, sticky="w", pady=(10, 0))
         key = tk.StringVar(master=win, value=self.cfg.get("key", ""))
@@ -9055,9 +9060,9 @@ class DoctorApp:
                 return
             days = sorted(rows)
             total = sum(sum(v) for v in rows.values())
-            if not messagebox.askyesno("이전 기록", "이전 기록 %d일치 (%s ~ %s, 총 %d건)를\n진료실 %s 기록으로 올립니다.\n"
+            if not messagebox.askyesno("이전 기록", "이전 기록 %d일치 (%s ~ %s, 총 %d건)를\n%s 기록으로 올립니다.\n"
                                        "(같은 날짜는 최신 값으로 덮어씀) 계속할까요?"
-                                       % (len(days), days[0], days[-1], total, self.room), parent=win):
+                                       % (len(days), days[0], days[-1], total, room_label(self.room)), parent=win):
                 return
             db, r = self.db, self.room
             self.runner.submit(lambda: db.patch("legacy/" + r, rows),

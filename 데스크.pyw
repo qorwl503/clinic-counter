@@ -397,7 +397,12 @@ SOUNDS = {
 DEFAULT_SOUNDS = {"1": "딩동", "2": "딩동 (낮게)", "staff1": "딩동 두 번", "staff2": "딩동 두 번 (낮게)",
                   "staff": "딩동 두 번", "msg": "무음"}
 DEFAULT_MSG_BUTTONS = ["대기", "폐암사후", "종검결과"]
-STAFF_ROOM_NO = {"1": "7", "2": "8"}   # 직원 호출 팝업: 진료실 1 → 7번, 진료실 2 → 8번 진료실
+STAFF_ROOM_NO = {"1": "7", "2": "8"}   # 화면 표시: 진료실 1 → 7번 진료실, 진료실 2 → 8번 진료실
+
+
+def room_label(r):
+    """화면에 보이는 진료실 이름 (내부 번호 1·2 → 7번·8번 진료실)"""
+    return "%s번 진료실" % STAFF_ROOM_NO.get(str(r), r)
 
 
 def msg_text(label):
@@ -657,7 +662,7 @@ class StatsWindow:
         lines = []
         for r in self.rooms:
             p, t = totals[r]
-            lines.append("진료실 %s — 진료 완료 %d명, 업무 %d건" % (r, p, sum(t)))
+            lines.append("%s — 진료 완료 %d명, 업무 %d건" % (room_label(r), p, sum(t)))
             lines.append("    " + summary_text(t))
             busy = ["%d시 %d" % (h, n) for h, n in enumerate(hours[r]) if n]
             if busy:
@@ -713,7 +718,7 @@ class StatsWindow:
         lines = []
         for r in self.rooms:
             p, t, lg = info[r]
-            lines.append("%s 진료실 %s: 진료 완료 %d명 · %s%s" % (day, r, p, summary_text(t),
+            lines.append("%s %s: 진료 완료 %d명 · %s%s" % (day, room_label(r), p, summary_text(t),
                                                            "  (이전 버전 기록 포함)" if lg else ""))
         self.detail.config(text="\n".join(lines))
 
@@ -730,7 +735,7 @@ class StatsWindow:
             w = csv.writer(f)
             head = ["날짜"]
             for r in self.rooms:
-                head += ["진료실%s 진료완료" % r] + ["진료실%s %s" % (r, n) for n in NAMES]
+                head += ["%s 진료완료" % room_label(r)] + ["%s %s" % (room_label(r), n) for n in NAMES]
             w.writerow(head)
             for day in sorted(self.days):
                 row = [day]
@@ -778,10 +783,10 @@ class TaskDetail:
 
     def __init__(self, parent, db, runner, room, task, topmost=True):
         self.win = tk.Toplevel(parent)
-        self.win.title("진료실 %s · %s" % (room, NAMES[task]))
+        self.win.title("%s · %s" % (room_label(room), NAMES[task]))
         self.win.geometry("380x440")
         self.win.attributes("-topmost", topmost)
-        tk.Label(self.win, text="진료실 %s · %s" % (room, NAMES[task]), font=(FONT, 13, "bold")).pack(
+        tk.Label(self.win, text="%s · %s" % (room_label(room), NAMES[task]), font=(FONT, 13, "bold")).pack(
             anchor="w", padx=14, pady=(12, 4))
         self.info = tk.Label(self.win, text="불러오는 중…", justify="left", anchor="w", font=(FONT, 11))
         self.info.pack(fill="x", padx=14)
@@ -8498,7 +8503,7 @@ class DeskApp:
         for r in ROOMS:
             var = tk.BooleanVar(master=self.root, value=r in saved)
             self.sel[r] = var
-            tk.Checkbutton(mine, text="진료실 " + r, variable=var, bg="#fff8e6", font=(FONT, 10, "bold"),
+            tk.Checkbutton(mine, text=room_label(r), variable=var, bg="#fff8e6", font=(FONT, 10, "bold"),
                            command=self.set_mode).pack(side="left", padx=4)
         self.show_all = tk.BooleanVar(master=self.root, value=bool(self.cfg.get("show_all", False)))
         tk.Checkbutton(mine, text="화면은 둘 다 보기", variable=self.show_all, bg="#fff8e6", font=(FONT, 9),
@@ -8514,7 +8519,7 @@ class DeskApp:
             box.grid(row=0, column=ci, sticky="nsew", padx=(0, 6) if ci == 0 else (6, 0))
             head = tk.Frame(box, bg="#eaf2fc")
             head.pack(fill="x")
-            tk.Label(head, text="진료실 " + r, bg="#eaf2fc", font=(FONT, 14, "bold")).pack(side="left")
+            tk.Label(head, text=room_label(r), bg="#eaf2fc", font=(FONT, 14, "bold")).pack(side="left")
             own = tk.Label(head, bg="#eaf2fc", font=(FONT, 8))
             own.pack(side="right")
             big = tk.Label(box, bg="#eaf2fc", fg="#1d62b2", font=(FONT, 22, "bold"), anchor="w")
@@ -8895,14 +8900,14 @@ class DeskApp:
                 pass
         p = tk.Toplevel(self.root)
         self.staff_popups[r] = p
-        p.title("진료실 %s 직원 호출" % r)
+        p.title("%s 직원 호출" % room_label(r))
         sw = p.winfo_screenwidth()
         x = sw // 2 - 460 if r == "1" else sw // 2 + 20
         p.geometry("440x190+%d+330" % max(0, x))
         p.attributes("-topmost", True)
         bg, fg = "#ece4ff", "#5b2fa8"
         p.configure(bg=bg)
-        tk.Label(p, text="🙋 %s번 진료실" % STAFF_ROOM_NO.get(r, r), font=(FONT, 22, "bold"), bg=bg, fg=fg).pack(pady=(18, 0))
+        tk.Label(p, text="🙋 " + room_label(r), font=(FONT, 22, "bold"), bg=bg, fg=fg).pack(pady=(18, 0))
         tk.Label(p, text="%s번 진료실로 와주세요%s" % (STAFF_ROOM_NO.get(r, r), " (다시)" if again else ""),
                  font=(FONT, 15, "bold"), bg=bg, fg=fg).pack()
         tk.Label(p, text="호출 %s" % when, font=(FONT, 10), bg=bg).pack(pady=(4, 6))
@@ -8944,13 +8949,13 @@ class DeskApp:
                 pass
         p = tk.Toplevel(self.root)
         self.popups[r] = p
-        p.title("진료실 %s 호출" % r)
+        p.title("%s 호출" % room_label(r))
         sw = p.winfo_screenwidth()
         x = sw // 2 - 460 if r == "1" else sw // 2 + 20
         p.geometry("440x190+%d+120" % max(0, x))
         p.attributes("-topmost", True)
         p.configure(bg="#fff0df")
-        tk.Label(p, text="🔔 %s번 진료실" % STAFF_ROOM_NO.get(r, r), font=(FONT, 22, "bold"), bg="#fff0df",
+        tk.Label(p, text="🔔 " + room_label(r), font=(FONT, 22, "bold"), bg="#fff0df",
                  fg="#a83725").pack(pady=(18, 0))
         tk.Label(p, text="🔁 다시 호출 — 같은 환자 모셔주세요" if again else "다음 환자 모셔주세요",
                  font=(FONT, 15, "bold"), bg="#fff0df", fg="#a83725").pack()
@@ -9058,8 +9063,8 @@ class DeskApp:
 
         tk.Label(win, text="알림음 (진료실마다·호출 종류마다 다르게)", font=(FONT, 10, "bold")).pack(pady=(14, 2), **pad)
         svars = {}
-        for skey, label in (("sound1", "진료실 1 환자"), ("sound_staff1", "진료실 1 직원"),
-                            ("sound2", "진료실 2 환자"), ("sound_staff2", "진료실 2 직원")):
+        for skey, label in (("sound1", room_label("1") + " 환자"), ("sound_staff1", room_label("1") + " 직원"),
+                            ("sound2", room_label("2") + " 환자"), ("sound_staff2", room_label("2") + " 직원")):
             row2 = tk.Frame(win)
             row2.pack(pady=1, **pad)
             tk.Label(row2, text=label, width=12, anchor="w").pack(side="left")
