@@ -823,7 +823,7 @@ class TaskDetail:
                 self.lb.insert(tk.END, "오늘 기록 없음")
 
         runner.submit(fetch, show, lambda e: self.info.config(text="불러오기 실패: %s" % e))
-def auto_update(exe_name):
+def auto_update(stem):
     """켤 때 새 버전이 있으면 내려받아 바꾸고 다시 실행. 업데이트했으면 이 프로세스는 종료됨."""
     if not getattr(sys, "frozen", False) or BUILD_VERSION == "dev":
         return
@@ -843,6 +843,12 @@ def auto_update(exe_name):
         return
     if not latest or latest == BUILD_VERSION or len(latest) < 7:
         return
+    # 같은 버전으로 계속 업데이트를 반복하지 않도록 (10분에 한 번만 시도)
+    guard = DATA_DIR / ("update_%s.json" % stem)
+    g = load_json(guard, {})
+    if g.get("target") == latest and time.time() - g.get("at", 0) < 600:
+        return
+    save_json(guard, {"target": latest, "at": time.time()})
     win = tk.Tk()
     win.title("업데이트")
     win.attributes("-topmost", True)
@@ -851,7 +857,8 @@ def auto_update(exe_name):
     win.update()
     new = exe.with_name(exe.name + ".new")
     try:
-        with urllib.request.urlopen(UPDATE_BASE + exe_name, timeout=90) as r:
+        # 버전별 파일 이름으로 받아서, 예전 파일이 캐시에서 내려오는 일이 없게 함
+        with urllib.request.urlopen(UPDATE_BASE + "%s-%s.exe" % (stem, latest), timeout=90) as r:
             data = r.read()
         if len(data) < 1000000 or data[:2] != b"MZ":
             raise ValueError("잘못된 파일")
@@ -1601,5 +1608,5 @@ class DoctorApp:
 
 
 if __name__ == "__main__":
-    auto_update("room.exe")
+    auto_update("room")
     DoctorApp().root.mainloop()
