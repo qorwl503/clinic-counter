@@ -266,6 +266,17 @@ def task_counts(day_node, room):
     return counts
 
 
+def call_count(day_node, room):
+    """데스크가 '확인'(환자 들여보냄)한 호출 수 — 업무 카운트와 비교용"""
+    c = dig(day_node, "calls", room) or {}
+    return sum(1 for v in c.values() if isinstance(v, dict))
+
+
+def count_text(counted):
+    """의사가 업무 + 를 누른 수"""
+    return "진료 카운트 %d명" % counted
+
+
 def done_ids(day_node, room):
     d = dig(day_node, "done", room) or {}
     return sorted(k for k, v in d.items() if isinstance(v, dict))
@@ -558,7 +569,7 @@ class StatsWindow:
         self.data = None
         self.win = tk.Toplevel(parent)
         self.win.title("월별 진료 기록")
-        self.win.geometry("780x680")
+        self.win.geometry("780x760")
         self.win.attributes("-topmost", topmost)
         bar = tk.Frame(self.win, padx=10, pady=8)
         bar.pack(fill="x")
@@ -617,6 +628,7 @@ class StatsWindow:
         if ym != self.month.strftime("%Y-%m") or not self.win.winfo_exists():
             return
         days = {}
+        self.calls = calls = {}
         hours = {r: [0] * 24 for r in self.rooms}
         blank = lambda: {x: [0, [0] * len(NAMES), False] for x in self.rooms}
         for day, node in (ev or {}).items():
@@ -627,6 +639,7 @@ class StatsWindow:
                 d[r][1] = task_counts(node, r)
                 done = dig(node, "done", r) or {}
                 d[r][0] = len(done) + sum(d[r][1])
+                calls.setdefault(day, {})[r] = call_count(node, r)
                 times = [v for v in done.values() if isinstance(v, dict)]
                 times += [e for e in (dig(node, "events") or {}).values()
                           if isinstance(e, dict) and e.get("room") == r]
@@ -662,11 +675,12 @@ class StatsWindow:
         lines = []
         for r in self.rooms:
             p, t = totals[r]
-            lines.append("%s — 진료 완료 %d명, 업무 %d건" % (room_label(r), p, sum(t)))
+            nc = sum(c.get(r, 0) for c in calls.values())
+            lines.append("%s — 진료 완료 %d명 · 진료 카운트 %d명 (업무 %d건)" % (room_label(r), nc, p, sum(t)))
             lines.append("    " + summary_text(t))
             busy = ["%d시 %d" % (h, n) for h, n in enumerate(hours[r]) if n]
             if busy:
-                lines.append("    시간대별 진료 완료: " + " · ".join(busy))
+                lines.append("    시간대별 진료 카운트: " + " · ".join(busy))
         if any_legacy:
             lines.append("* 이전 버전(v12) 기록 포함 — 업무 건수를 진료 완료 인원으로 함께 계산했습니다.")
         if not days:
@@ -697,7 +711,7 @@ class StatsWindow:
                     if len(self.rooms) > 1:
                         for r in self.rooms:
                             p = info[r][0]
-                            lines.append("%s실 %d명%s" % (r, p, "*" if info[r][2] else ""))
+                            lines.append("%s번 %d명%s" % (STAFF_ROOM_NO.get(r, r), p, "*" if info[r][2] else ""))
                     else:
                         r = self.rooms[0]
                         lines.append("%d명%s" % (info[r][0], "*" if info[r][2] else ""))
@@ -718,8 +732,9 @@ class StatsWindow:
         lines = []
         for r in self.rooms:
             p, t, lg = info[r]
-            lines.append("%s %s: 진료 완료 %d명 · %s%s" % (day, room_label(r), p, summary_text(t),
-                                                           "  (이전 버전 기록 포함)" if lg else ""))
+            nc = getattr(self, "calls", {}).get(day, {}).get(r, 0)
+            lines.append("%s %s: 진료 완료 %d명 · %s" % (day, room_label(r), nc, count_text(p)))
+            lines.append("      %s%s" % (summary_text(t), "  (이전 버전 기록 포함)" if lg else ""))
         self.detail.config(text="\n".join(lines))
 
     def export_daily(self):
@@ -8522,12 +8537,14 @@ class DeskApp:
             tk.Label(head, text=room_label(r), bg="#eaf2fc", font=(FONT, 14, "bold")).pack(side="left")
             own = tk.Label(head, bg="#eaf2fc", font=(FONT, 8))
             own.pack(side="right")
-            big = tk.Label(box, bg="#eaf2fc", fg="#1d62b2", font=(FONT, 22, "bold"), anchor="w")
-            big.pack(fill="x", pady=(2, 0))
+            brow = tk.Frame(box, bg="#eaf2fc")
+            brow.pack(fill="x", pady=(2, 0))
+            big = tk.Label(brow, bg="#eaf2fc", fg="#1d62b2", font=(FONT, 22, "bold"), anchor="w")
+            big.pack(side="left")
             waitinfo = tk.Label(box, bg="#eaf2fc", fg="#56647b", font=(FONT, 10, "bold"), anchor="w",
                                 justify="left")
-            done = tk.Label(box, bg="#eaf2fc", fg="#24824d", font=(FONT, 12, "bold"), anchor="w")
-            done.pack(fill="x")
+            done = tk.Label(brow, bg="#eaf2fc", fg="#24824d", font=(FONT, 14, "bold"), anchor="w")
+            done.pack(side="left", padx=(6, 0), pady=(6, 0))
             call = tk.Label(box, bg="#eaf2fc", fg="#56647b", font=(FONT, 9), anchor="w",
                             justify="left", wraplength=280)
             call.pack(fill="x", pady=(2, 5))
@@ -8555,6 +8572,8 @@ class DeskApp:
             msginfo.pack(fill="x")
             tl = tk.Frame(box, bg="#eaf2fc")
             tl.pack(fill="x", pady=(8, 0))
+            count = tk.Label(tl, bg="#eaf2fc", font=(FONT, 9, "bold"), anchor="w")
+            count.pack(fill="x")
             tk.Label(tl, text="업무별 (누르면 상세)", bg="#eaf2fc", fg="#65738a",
                      font=(FONT, 8)).pack(anchor="w")
             rows = []
@@ -8564,8 +8583,8 @@ class DeskApp:
                 lab.pack(fill="x", pady=1)
                 lab.bind("<Button-1>", lambda e, r=r, i=i: self.task_detail(r, i))
                 rows.append(lab)
-            self.w[r] = {"box": box, "own": own, "big": big, "done": done, "call": call,
-                         "ack": ack, "head": head, "btns": btns, "tl": tl, "rows": rows,
+            self.w[r] = {"box": box, "own": own, "big": big, "done": done, "brow": brow, "call": call,
+                         "ack": ack, "head": head, "btns": btns, "tl": tl, "rows": rows, "count": count,
                          "mb": mb, "mbr": mbr, "msginfo": msginfo, "waitinfo": waitinfo}
 
         bottom = tk.Frame(f, bg=BG)
@@ -8622,7 +8641,9 @@ class DeskApp:
                 w["big"].config(text="대기 —")
             else:
                 w["big"].config(text="대기 %d명" % waiting)
-            w["done"].config(text="오늘 진료 완료 %d명" % patients)
+            completed = call_count(self.events, r)
+            w["done"].config(text="/  진료 완료 %d명" % completed)
+            w["count"].config(text=count_text(patients), fg="#c0641a")
             stale = not self.online
             w["big"].config(fg="#9aa6b8" if stale else "#1d62b2")
             w["done"].config(fg="#9aa6b8" if stale else "#24824d")
@@ -8651,9 +8672,9 @@ class DeskApp:
                     fg="#21804c" if m.get("acked") else "#8a6d1d")
             else:
                 w["msginfo"].config(text="")
-            for key in ("box", "head", "btns", "tl", "own", "big", "done", "call", "mb", "mbr", "msginfo", "waitinfo"):
+            for key in ("box", "head", "btns", "tl", "own", "big", "done", "brow", "call", "mb", "mbr", "msginfo", "waitinfo"):
                 w[key].config(bg=color)
-            for child in list(w["head"].winfo_children()) + list(w["tl"].winfo_children())[:1]:
+            for child in list(w["head"].winfo_children()) + list(w["tl"].winfo_children())[:2]:
                 child.config(bg=color)
             note = self.notes.get(r, "") if hasattr(self, "notes") else ""
             if r in getattr(self, "staff_unacked", ()):
@@ -8991,6 +9012,9 @@ class DeskApp:
                     if tids:
                         new["ticket"] = {"id": tids[0], "v": queue_now[tids[0]]}
                     if db.put_if("live/rooms/%s/call" % r, new, tag):
+                        if cur.get("id"):   # 호출 입실 기록 (진료 완료 카운트와 비교용)
+                            db.put("days/%s/calls/%s/%s" % (cur.get("d") or today(), r, cur["id"]),
+                                   {"time": now_hms(), "desk": name})
                         if tids:
                             db.delete("live/rooms/%s/queue/%s" % (r, tids[0]))
                         return "ok"

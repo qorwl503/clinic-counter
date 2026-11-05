@@ -266,6 +266,17 @@ def task_counts(day_node, room):
     return counts
 
 
+def call_count(day_node, room):
+    """데스크가 '확인'(환자 들여보냄)한 호출 수 — 업무 카운트와 비교용"""
+    c = dig(day_node, "calls", room) or {}
+    return sum(1 for v in c.values() if isinstance(v, dict))
+
+
+def count_text(counted):
+    """의사가 업무 + 를 누른 수"""
+    return "진료 카운트 %d명" % counted
+
+
 def done_ids(day_node, room):
     d = dig(day_node, "done", room) or {}
     return sorted(k for k, v in d.items() if isinstance(v, dict))
@@ -558,7 +569,7 @@ class StatsWindow:
         self.data = None
         self.win = tk.Toplevel(parent)
         self.win.title("월별 진료 기록")
-        self.win.geometry("780x680")
+        self.win.geometry("780x760")
         self.win.attributes("-topmost", topmost)
         bar = tk.Frame(self.win, padx=10, pady=8)
         bar.pack(fill="x")
@@ -617,6 +628,7 @@ class StatsWindow:
         if ym != self.month.strftime("%Y-%m") or not self.win.winfo_exists():
             return
         days = {}
+        self.calls = calls = {}
         hours = {r: [0] * 24 for r in self.rooms}
         blank = lambda: {x: [0, [0] * len(NAMES), False] for x in self.rooms}
         for day, node in (ev or {}).items():
@@ -627,6 +639,7 @@ class StatsWindow:
                 d[r][1] = task_counts(node, r)
                 done = dig(node, "done", r) or {}
                 d[r][0] = len(done) + sum(d[r][1])
+                calls.setdefault(day, {})[r] = call_count(node, r)
                 times = [v for v in done.values() if isinstance(v, dict)]
                 times += [e for e in (dig(node, "events") or {}).values()
                           if isinstance(e, dict) and e.get("room") == r]
@@ -662,11 +675,12 @@ class StatsWindow:
         lines = []
         for r in self.rooms:
             p, t = totals[r]
-            lines.append("%s — 진료 완료 %d명, 업무 %d건" % (room_label(r), p, sum(t)))
+            nc = sum(c.get(r, 0) for c in calls.values())
+            lines.append("%s — 진료 완료 %d명 · 진료 카운트 %d명 (업무 %d건)" % (room_label(r), nc, p, sum(t)))
             lines.append("    " + summary_text(t))
             busy = ["%d시 %d" % (h, n) for h, n in enumerate(hours[r]) if n]
             if busy:
-                lines.append("    시간대별 진료 완료: " + " · ".join(busy))
+                lines.append("    시간대별 진료 카운트: " + " · ".join(busy))
         if any_legacy:
             lines.append("* 이전 버전(v12) 기록 포함 — 업무 건수를 진료 완료 인원으로 함께 계산했습니다.")
         if not days:
@@ -697,7 +711,7 @@ class StatsWindow:
                     if len(self.rooms) > 1:
                         for r in self.rooms:
                             p = info[r][0]
-                            lines.append("%s실 %d명%s" % (r, p, "*" if info[r][2] else ""))
+                            lines.append("%s번 %d명%s" % (STAFF_ROOM_NO.get(r, r), p, "*" if info[r][2] else ""))
                     else:
                         r = self.rooms[0]
                         lines.append("%d명%s" % (info[r][0], "*" if info[r][2] else ""))
@@ -718,8 +732,9 @@ class StatsWindow:
         lines = []
         for r in self.rooms:
             p, t, lg = info[r]
-            lines.append("%s %s: 진료 완료 %d명 · %s%s" % (day, room_label(r), p, summary_text(t),
-                                                           "  (이전 버전 기록 포함)" if lg else ""))
+            nc = getattr(self, "calls", {}).get(day, {}).get(r, 0)
+            lines.append("%s %s: 진료 완료 %d명 · %s" % (day, room_label(r), nc, count_text(p)))
+            lines.append("      %s%s" % (summary_text(t), "  (이전 버전 기록 포함)" if lg else ""))
         self.detail.config(text="\n".join(lines))
 
     def export_daily(self):
@@ -8616,6 +8631,8 @@ class DoctorApp:
         self.w["undo"] = tk.Button(mrow, text="↶ 되돌리기", relief="flat", bg="#ffe9b8",
                                    font=(FONT, 10, "bold"), command=self.undo_last)
 
+        self.w["count"] = tk.Label(o, bg=BG, font=(FONT, 11, "bold"), anchor="w")
+        self.w["count"].pack(fill="x", pady=(2, 0))
         self.w["rows"] = []
         for i, name in enumerate(NAMES):
             row = tk.Frame(o, bg="white", pady=2)
@@ -8668,7 +8685,9 @@ class DoctorApp:
         w = self.waiting()
         self.w["wait"].config(text=("대기 %d명" % w) if connected else "대기 —",
                               fg="#17539b" if self.online else "#9aa6b8")
-        self.w["done"].config(text="진료 완료 %d명" % completed)
+        done_calls = call_count(self.events, self.room)
+        self.w["done"].config(text="진료 완료 %d명" % done_calls)
+        self.w["count"].config(text=count_text(completed), fg="#c0641a")
         # 대기 시간 알림: 첫 대기 환자가 5분 넘으면 주황, 10분 넘으면 빨강
         q = self.room_node.get("queue") if isinstance(self.room_node, dict) else None
         mins = []
@@ -8823,7 +8842,7 @@ class DoctorApp:
         if day == self.events_day:
             mirror.append(("/events/" + eid, ev))
         self.queue_op(eid, patch, mirror)
-        self.flash("✔ %s 기록 (진료 완료 +1)" % NAMES[task], undo_eid=eid)
+        self.flash("✔ %s 기록 (진료 카운트 +1)" % NAMES[task], undo_eid=eid)
 
     def unrecord(self, task):
         mine = sorted((k for k, e in (dig(self.events, "events") or {}).items()
@@ -8971,6 +8990,8 @@ class DoctorApp:
             return
         db, room = self.db, self.room
         patch = {"live/rooms/%s/call/cancelled" % room: True}
+        if call.get("acked") and call.get("id"):   # 확인 후 취소 → 호출 입실 기록도 지움
+            patch["days/%s/calls/%s/%s" % (call.get("d") or today(), room, call["id"])] = None
         tk_ = call.get("ticket")
         if (call.get("acked") and isinstance(tk_, dict) and isinstance(tk_.get("v"), dict)
                 and tk_["v"].get("d") == today()):
