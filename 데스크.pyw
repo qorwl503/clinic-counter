@@ -8978,7 +8978,7 @@ class DeskApp:
         p.configure(bg="#fff0df")
         tk.Label(p, text="🔔 " + room_label(r), font=(FONT, 22, "bold"), bg="#fff0df",
                  fg="#a83725").pack(pady=(18, 0))
-        tk.Label(p, text="🔁 다시 호출 — 같은 환자 모셔주세요" if again else "다음 환자 모셔주세요",
+        tk.Label(p, text="🔁 다시 호출 — 환자 모셔주세요" if again else "다음 환자 모셔주세요",
                  font=(FONT, 15, "bold"), bg="#fff0df", fg="#a83725").pack()
         tk.Label(p, text="호출 %s%s" % (when, "  (담당 데스크 없음)" if unowned else ""),
                  font=(FONT, 10), bg="#fff0df").pack(pady=(4, 6))
