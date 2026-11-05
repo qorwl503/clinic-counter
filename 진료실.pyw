@@ -272,6 +272,33 @@ def call_count(day_node, room):
     return sum(1 for v in c.values() if isinstance(v, dict))
 
 
+CALLS_SINCE = "2026-11-05"   # 이날부터 '진료 완료'를 데스크 호출 확인으로 셈
+
+
+def completed_count(day_node, room, day, counted):
+    """진료 완료 수 = 데스크가 호출 확인한 수.
+    기능이 생기기 전 기록(호출 확인 기록이 없던 때)은 진료 카운트로 대신 셈."""
+    calls = dig(day_node, "calls", room) or {}
+    n = sum(1 for v in calls.values() if isinstance(v, dict))
+    if day < CALLS_SINCE:
+        return counted
+    if day > CALLS_SINCE:
+        return n
+    times = sorted(str(v.get("time", "")) for v in calls.values() if isinstance(v, dict))
+    if not times:
+        return counted
+    before = 0   # 첫 호출 확인 기록 전에 누른 진료 카운트 = 그 전에 진료한 환자
+    for kind in ("events", "done"):
+        node = dig(day_node, kind) or {}
+        if kind == "done":
+            node = node.get(room) or {}
+        for v in node.values():
+            if (isinstance(v, dict) and (kind == "done" or v.get("room") == room)
+                    and str(v.get("time", "")) < times[0]):
+                before += 1
+    return before + n
+
+
 def count_text(counted):
     """의사가 업무 + 를 누른 수"""
     return "진료 카운트 %d명" % counted
@@ -639,7 +666,7 @@ class StatsWindow:
                 d[r][1] = task_counts(node, r)
                 done = dig(node, "done", r) or {}
                 d[r][0] = len(done) + sum(d[r][1])
-                calls.setdefault(day, {})[r] = call_count(node, r)
+                calls.setdefault(day, {})[r] = completed_count(node, r, day, d[r][0])
                 times = [v for v in done.values() if isinstance(v, dict)]
                 times += [e for e in (dig(node, "events") or {}).values()
                           if isinstance(e, dict) and e.get("room") == r]
@@ -662,6 +689,10 @@ class StatsWindow:
                         d[r][1][i] += c
                         d[r][0] += c   # 이전 버전: 업무 1건 = 진료 완료 1명
                 d[r][2] = True
+        for day, info in days.items():   # 이전 버전 기록만 있는 날도 진료 완료 = 진료 카운트
+            for r in self.rooms:
+                if day < CALLS_SINCE:
+                    calls.setdefault(day, {})[r] = info[r][0]
         self.days = days
         totals = {r: [0, [0] * len(NAMES)] for r in self.rooms}
         any_legacy = False
@@ -8676,7 +8707,25 @@ class DoctorApp:
     def waiting(self):
         return len(tickets_today(self.room_node))
 
+    def record_acked_call(self):
+        """데스크가 호출을 확인했으면 진료 완료 기록 (데스크 버전과 상관없이 진료실에서도 남김)"""
+        call = self.room_node.get("call") if isinstance(self.room_node, dict) else None
+        if (self.db is None or not self.online or not isinstance(call, dict) or not call.get("acked")
+                or call.get("cancelled") or not call.get("id") or call.get("d") != today()
+                or self.events_day != today()):
+            return
+        cid = call["id"]
+        sent = self.__dict__.setdefault("calls_sent", set())
+        if cid in sent or isinstance(dig(self.events, "calls", self.room, cid), dict):
+            return
+        sent.add(cid)
+        val = {"time": call.get("time") or now_hms(), "desk": call.get("acked")}
+        self.events = mirror_apply(self.events, "put", "/calls/%s/%s" % (self.room, cid), val)
+        db, path = self.db, "days/%s/calls/%s/%s" % (today(), self.room, cid)
+        self.runner.submit(lambda: db.put(path, val), fail=lambda e: sent.discard(cid))
+
     def render(self):
+        self.record_acked_call()
         self.w["title"].config(text=room_label(self.room))
         counts = [a + b for a, b in zip(task_counts(self.events, self.room), legacy_counts(self.legacy))]
         done = done_ids(self.events, self.room)
@@ -8685,7 +8734,7 @@ class DoctorApp:
         w = self.waiting()
         self.w["wait"].config(text=("대기 %d명" % w) if connected else "대기 —",
                               fg="#17539b" if self.online else "#9aa6b8")
-        done_calls = call_count(self.events, self.room)
+        done_calls = completed_count(self.events, self.room, self.events_day or today(), completed)
         self.w["done"].config(text="진료 완료 %d명" % done_calls)
         self.w["count"].config(text=count_text(completed), fg="#c0641a")
         # 대기 시간 알림: 첫 대기 환자가 5분 넘으면 주황, 10분 넘으면 빨강
