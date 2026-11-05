@@ -620,6 +620,9 @@ class StatsWindow:
                                                 self.detail.config(wraplength=max(300, self.win.winfo_width() - 30))))
         tk.Button(foot, text="일별 요약 CSV", command=self.export_daily).pack(side="left")
         tk.Button(foot, text="전체 기록 CSV", command=self.export_events).pack(side="left", padx=8)
+        tk.Button(foot, text="🔎 업무별 모아보기", font=(FONT, 10, "bold"), bg="#e9f1ff",
+                  command=lambda: TaskLogWindow(self.win, self.db, self.runner, 3, self.month,
+                                                topmost)).pack(side="right")
         self.load()
 
     def move(self, off):
@@ -824,6 +827,141 @@ class StatsWindow:
             messagebox.showinfo("저장 완료", "CSV 파일을 저장했습니다.", parent=self.win)
 
         self.runner.submit(fetch, write, lambda e: messagebox.showerror("실패", str(e), parent=self.win))
+class TaskLogWindow:
+    """업무 하나(예: 폐암사후)를 두 진료실 모두 모아서 언제·어느 진료실에서 했는지 보기"""
+    WEEK = "월화수목금토일"
+
+    def __init__(self, parent, db, runner, task=3, month=None, topmost=True):
+        self.db, self.runner = db, runner
+        self.month = month or date.today().replace(day=1)
+        self.rows = []
+        self.win = tk.Toplevel(parent)
+        self.win.title("업무별 모아보기")
+        self.win.geometry("460x620")
+        self.win.attributes("-topmost", topmost)
+        bar = tk.Frame(self.win, padx=10, pady=8)
+        bar.pack(fill="x")
+        tk.Label(bar, text="업무:", font=(FONT, 10, "bold")).pack(side="left")
+        self.task = tk.StringVar(master=self.win, value=NAMES[task])
+        cb = ttk.Combobox(bar, textvariable=self.task, values=NAMES, state="readonly", width=14)
+        cb.pack(side="left", padx=4)
+        cb.bind("<<ComboboxSelected>>", lambda e: self.render())
+        mbar = tk.Frame(self.win, padx=10)
+        mbar.pack(fill="x")
+        tk.Button(mbar, text="◀", command=lambda: self.move(-1)).pack(side="left")
+        self.title = tk.Label(mbar, font=(FONT, 13, "bold"))
+        self.title.pack(side="left", expand=True)
+        tk.Button(mbar, text="▶", command=lambda: self.move(1)).pack(side="right")
+        self.summary = tk.Label(self.win, font=(FONT, 11, "bold"), fg="#18263b", justify="left", anchor="w")
+        self.summary.pack(fill="x", padx=12, pady=(8, 4))
+        box = tk.Frame(self.win, padx=10)
+        box.pack(fill="both", expand=True)
+        sb = tk.Scrollbar(box)
+        sb.pack(side="right", fill="y")
+        self.list = tk.Listbox(box, font=(FONT, 11), yscrollcommand=sb.set, activestyle="none")
+        self.list.pack(side="left", fill="both", expand=True)
+        sb.config(command=self.list.yview)
+        foot = tk.Frame(self.win, padx=10, pady=8)
+        foot.pack(fill="x")
+        tk.Button(foot, text="CSV 저장", command=self.export).pack(side="left")
+        self.load()
+
+    def move(self, off):
+        m = self.month.month + off
+        y = self.month.year + (m - 1) // 12
+        self.month = date(y, (m - 1) % 12 + 1, 1)
+        self.load()
+
+    def load(self):
+        ym = self.month.strftime("%Y-%m")
+        self.title.config(text="%d년 %d월" % (self.month.year, self.month.month))
+        self.summary.config(text="불러오는 중…")
+        self.list.delete(0, "end")
+        self.data = None
+
+        def fetch():
+            ev = self.db.get("days", {"orderBy": '"$key"', "startAt": '"%s-01"' % ym,
+                                      "endAt": '"%s-31"' % ym}) or {}
+            legacy = {r: self.db.get("legacy/" + r) or {} for r in ROOMS}
+            return ym, ev, legacy
+
+        def got(res):
+            if res[0] == self.month.strftime("%Y-%m") and self.win.winfo_exists():
+                self.data = res
+                self.render()
+
+        self.runner.submit(fetch, got, lambda e: self.summary.config(text="불러오기 실패: %s" % e))
+
+    def render(self):
+        if not self.data:
+            return
+        ym, ev, legacy = self.data
+        t = NAMES.index(self.task.get()) if self.task.get() in NAMES else 3
+        rows = []   # (날짜, 시각, 진료실, 건수)
+        for day, node in (ev or {}).items():
+            for e in (dig(node, "events") or {}).values():
+                if isinstance(e, dict) and e.get("task") == t and e.get("room") in ROOMS:
+                    rows.append((day, str(e.get("time", "")), e.get("room"), 1))
+        for r in ROOMS:   # 이전 버전(v12) 기록은 시각 없이 건수만
+            for day, counts in (legacy.get(r) or {}).items():
+                if not str(day).startswith(ym):
+                    continue
+                if isinstance(counts, dict):
+                    c = counts.get(str(t), 0)
+                elif isinstance(counts, list) and len(counts) > t:
+                    c = counts[t]
+                else:
+                    c = 0
+                if isinstance(c, int) and c > 0:
+                    rows.append((day, "", r, c))
+        rows.sort()
+        self.rows = rows
+        self.list.delete(0, "end")
+        per = {r: 0 for r in ROOMS}
+        last_day = None
+        for day, tm, r, c in rows:
+            per[r] += c
+            try:
+                d = datetime.strptime(day, "%Y-%m-%d")
+                dlabel = "%s (%s)" % (d.strftime("%m-%d"), self.WEEK[d.weekday()])
+            except ValueError:
+                dlabel = day
+            if last_day is not None and day != last_day:
+                self.list.insert("end", "")
+            last_day = day
+            when = tm[:5] if tm else "시각 없음"
+            self.list.insert("end", "  %s   %s   %s%s" % (dlabel, when, room_label(r),
+                                                          "  %d건 (이전 버전)" % c if not tm else ""))
+        total = sum(per.values())
+        a, b = ROOMS
+        if per[a] == per[b]:
+            turn = "두 진료실 같음"
+        else:
+            low = a if per[a] < per[b] else b
+            turn = "다음은 %s 차례 (%d건 적음)" % (room_label(low), abs(per[a] - per[b]))
+        self.summary.config(text="%s  총 %d건   —   %s\n→ %s" % (
+            NAMES[t], total, " · ".join("%s %d건" % (room_label(r), per[r]) for r in ROOMS), turn))
+        if not rows:
+            self.list.insert("end", "  이 달 기록이 없습니다.")
+
+    def export(self):
+        if not self.rows:
+            return
+        import csv
+        name = self.task.get()
+        target = filedialog.asksaveasfilename(parent=self.win, defaultextension=".csv",
+                                              initialfile="%s_%s.csv" % (name, self.month.strftime("%Y-%m")),
+                                              filetypes=[("CSV", "*.csv")])
+        if not target:
+            return
+        with open(target, "w", newline="", encoding="utf-8-sig") as f:
+            w = csv.writer(f)
+            w.writerow(["날짜", "시각", "진료실", "업무", "건수"])
+            for day, tm, r, c in self.rows:
+                w.writerow([day, tm, room_label(r), name, c])
+        messagebox.showinfo("저장 완료", "CSV 파일을 저장했습니다.", parent=self.win)
+
+
 class TaskDetail:
     """업무 하나의 상세: 오늘/이번 달/올해 건수, 마지막 기록, 오늘 시각 목록"""
 
