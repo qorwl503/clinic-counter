@@ -285,10 +285,25 @@ def dig(obj, *keys):
     return obj
 
 
-def tickets_today(room_node):
-    q = dig(room_node, "queue") or {}
+def ticket_order(tid, v):
+    """대기 순서 기준: 데스크가 순서를 바꿨으면 그 값(o), 아니면 접수 시각(ID 앞 13자리 = ms)"""
+    o = v.get("o") if isinstance(v, dict) else None
+    if isinstance(o, (int, float)) and not isinstance(o, bool):
+        return (float(o), tid)
+    try:
+        return (float(int(str(tid)[:13])), tid)
+    except ValueError:
+        return (0.0, tid)
+
+
+def sort_queue(q):
     d = today()
-    return sorted(k for k, v in q.items() if isinstance(v, dict) and v.get("d") == d)
+    return sorted((k for k, v in (q or {}).items() if isinstance(v, dict) and v.get("d") == d),
+                  key=lambda k: ticket_order(k, q[k]))
+
+
+def tickets_today(room_node):
+    return sort_queue(dig(room_node, "queue") or {})
 
 
 def task_counts(day_node, room):
@@ -15593,7 +15608,15 @@ class DeskApp:
             else:
                 w["big"].config(text="대기 %d명" % waiting)
             completed = completed_count(self.events, r, self.events_day or today(), patients)
-            w["done"].config(text="✔ 진료 완료 %d명" % completed)
+            txt = "✔ 진료 완료 %d명" % completed
+            try:   # 칸이 좁으면(두 진료실 나란히) 짧게: 카드 위에 '오늘 진료 완료'가 이미 있음
+                from tkinter import font as tkfont
+                room_w = w["done"].master.winfo_width()
+                if room_w > 20 and tkfont.Font(font=w["done"].cget("font")).measure(txt) > room_w - 4:
+                    txt = "✔ %d명" % completed
+            except tk.TclError:
+                pass
+            w["done"].config(text=txt)
             w["count"].config(text=count_text(patients), fg="#c0641a")
             q = dig(node, "queue") or {}
             order = tickets_today(node)
@@ -15616,12 +15639,16 @@ class DeskApp:
                                          border="#f4b183" if first else "#c9d6ea", radius=10, pad=4)
                         chip.grid(row=1 + n_ // 2, column=n_ % 2, sticky="ew", padx=2, pady=2)
                         inner = chip.inner
+                        tid_ = order[n_]
                         tk.Label(inner, text="%d" % (n_ + 1), bg="#e8833a" if first else "#6f86a8", fg="white",
                                  font=(FONT, 9, "bold"), width=2).pack(side="left")
                         tk.Label(inner, text=name, bg=inner["bg"], fg="#1f2f48",
                                  font=(FONT, 11, "bold")).pack(side="left", padx=(6, 0))
                         tk.Label(inner, text=tm, bg=inner["bg"], fg="#6a778c",
                                  font=(FONT, 9)).pack(side="right")
+                        for wdg in [chip, inner] + list(inner.winfo_children()):   # 누르면 고치기 메뉴
+                            wdg.bind("<Button-1>", lambda e, r=r, t=tid_: self.queue_menu(e, r, t))
+                            wdg.config(cursor="hand2")
                     if len(order) > 8:
                         tk.Label(w["waitinfo"], text="외 %d명" % (len(order) - 8), bg="#eaf2fc", fg="#56647b",
                                  font=(FONT, 9, "bold")).grid(row=6, column=0, columnspan=2, sticky="w")
@@ -15770,11 +15797,102 @@ class DeskApp:
         ids = tickets_today(dig(self.live, "rooms", r))
         if not ids:
             return
-        tid = ids[-1]
+        tid = max(ids)   # 가장 최근에 등록한 환자 (접수 시각 기준)
         self.live = mirror_apply(self.live, "put", "/rooms/%s/queue/%s" % (r, tid), None)
         self.render()
         db = self.db
         self.runner.submit(lambda: db.delete("live/rooms/%s/queue/%s" % (r, tid)), fail=self.fail)
+
+    # ---------- 대기 환자 하나 고치기 (옆방 옮기기 / 순서 / 업무 / 빼기) ----------
+    def queue_menu(self, event, r, tid):
+        if not self.need_db():
+            return
+        other = [x for x in ROOMS if x != r][0]
+        ol = room_label(other)
+        m = tk.Menu(self.root, tearoff=0, font=(FONT, 11))
+        m.add_command(label="↔ %s로 옮기기 · 맨 앞" % ol, command=lambda: self.move_ticket(r, tid, other, "front"))
+        m.add_command(label="↔ %s로 옮기기 · 접수 순서대로" % ol, command=lambda: self.move_ticket(r, tid, other, "time"))
+        m.add_command(label="↔ %s로 옮기기 · 맨 뒤" % ol, command=lambda: self.move_ticket(r, tid, other, "back"))
+        m.add_separator()
+        m.add_command(label="▲ 앞으로 한 칸", command=lambda: self.shift_ticket(r, tid, -1))
+        m.add_command(label="▼ 뒤로 한 칸", command=lambda: self.shift_ticket(r, tid, 1))
+        sub = tk.Menu(m, tearoff=0, font=(FONT, 11))
+        for k in (0, 6, 2, 4, 3, 5):
+            sub.add_command(label=TASK_SHORT[k], command=lambda k=k: self.retask_ticket(r, tid, k))
+        m.add_cascade(label="✎ 업무 바꾸기", menu=sub)
+        m.add_separator()
+        m.add_command(label="✕ 대기에서 빼기", foreground="#a94848", command=lambda: self.drop_ticket(r, tid))
+        try:
+            m.tk_popup(event.x_root, event.y_root)
+        finally:
+            m.grab_release()
+
+    def _queue(self, r):
+        return dig(self.live, "rooms", r, "queue") or {}
+
+    def _write_queue(self, writes):
+        """writes: {(room, tid): 값 또는 None} → 화면 먼저 바꾸고 서버에 한 번에 저장"""
+        for (r, tid), v in writes.items():
+            self.live = mirror_apply(self.live, "put", "/rooms/%s/queue/%s" % (r, tid), v)
+        self.render()
+        db = self.db
+        patch = {"live/rooms/%s/queue/%s" % (r, tid): v for (r, tid), v in writes.items()}
+        self.runner.submit(lambda: db.patch("", patch), fail=self.fail)
+
+    def move_ticket(self, r, tid, other, where):
+        v = self._queue(r).get(tid)
+        if not isinstance(v, dict):
+            return
+        v = dict(v)
+        v.pop("o", None)
+        dest = self._queue(other)
+        ids = sort_queue(dest)
+        orders = [ticket_order(t, dest[t])[0] for t in ids]
+        if ids:
+            if where == "front":
+                v["o"] = orders[0] - 1
+            elif where == "back":
+                v["o"] = orders[-1] + 1
+            else:   # 접수 시각 순서대로: 나보다 늦게 접수한 첫 환자 바로 앞에 끼움
+                mine = ticket_order(tid, {})[0]
+                pos = next((i for i, t in enumerate(ids) if ticket_order(t, {})[0] > mine), len(ids))
+                if pos == 0:
+                    v["o"] = orders[0] - 1
+                elif pos == len(ids):
+                    v["o"] = orders[-1] + 1
+                else:
+                    v["o"] = (orders[pos - 1] + orders[pos]) / 2
+        self._write_queue({(r, tid): None, (other, tid): v})
+        self.set_status("%s 환자를 %s로 옮겼습니다" % (TASK_SHORT[ticket_task(v)] if ticket_task(v) is not None
+                                                     else "대기", room_label(other)), "#21804c")
+
+    def shift_ticket(self, r, tid, step):
+        q = self._queue(r)
+        ids = sort_queue(q)
+        if tid not in ids:
+            return
+        i = ids.index(tid)
+        j = i + step
+        if not 0 <= j < len(ids):
+            return
+        # 순서 값을 다시 매겨서 두 환자 자리만 바꿈
+        ids[i], ids[j] = ids[j], ids[i]
+        base = min(ticket_order(t, q[t])[0] for t in ids)
+        writes = {}
+        for n, t in enumerate(ids):
+            v = dict(q[t])
+            v["o"] = base + n * 1000
+            writes[(r, t)] = v
+        self._write_queue(writes)
+
+    def retask_ticket(self, r, tid, k):
+        v = self._queue(r).get(tid)
+        if isinstance(v, dict):
+            self._write_queue({(r, tid): dict(v, k=k)})
+
+    def drop_ticket(self, r, tid):
+        if isinstance(self._queue(r).get(tid), dict):
+            self._write_queue({(r, tid): None})
 
     def claim_free_rooms(self):
         """(이전 방식 호환용 — 담당은 각 데스크가 독립적으로 고름)"""
@@ -16011,8 +16129,7 @@ class DeskApp:
                     if not isinstance(cur, dict) or cur.get("acked") or cur.get("cancelled"):
                         return "skip"          # 다른 데스크가 먼저 확인함
                     queue_now = db.get("live/rooms/%s/queue" % r) or {}
-                    tids = sorted(k for k, v in queue_now.items()
-                                  if isinstance(v, dict) and v.get("d") == today())
+                    tids = sort_queue(queue_now)
                     new = dict(cur, acked=name)
                     if tids:
                         new["ticket"] = {"id": tids[0], "v": queue_now[tids[0]]}

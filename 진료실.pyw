@@ -285,10 +285,25 @@ def dig(obj, *keys):
     return obj
 
 
-def tickets_today(room_node):
-    q = dig(room_node, "queue") or {}
+def ticket_order(tid, v):
+    """대기 순서 기준: 데스크가 순서를 바꿨으면 그 값(o), 아니면 접수 시각(ID 앞 13자리 = ms)"""
+    o = v.get("o") if isinstance(v, dict) else None
+    if isinstance(o, (int, float)) and not isinstance(o, bool):
+        return (float(o), tid)
+    try:
+        return (float(int(str(tid)[:13])), tid)
+    except ValueError:
+        return (0.0, tid)
+
+
+def sort_queue(q):
     d = today()
-    return sorted(k for k, v in q.items() if isinstance(v, dict) and v.get("d") == d)
+    return sorted((k for k, v in (q or {}).items() if isinstance(v, dict) and v.get("d") == d),
+                  key=lambda k: ticket_order(k, q[k]))
+
+
+def tickets_today(room_node):
+    return sort_queue(dig(room_node, "queue") or {})
 
 
 def task_counts(day_node, room):
