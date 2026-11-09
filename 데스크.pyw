@@ -20,10 +20,11 @@ from tkinter import ttk, messagebox, filedialog, simpledialog
 VERSION = "v13"
 BUILD_VERSION = "dev"   # GitHub에서 exe를 만들 때 자동으로 바뀜
 UPDATE_BASE = "https://raw.githubusercontent.com/qorwl503/clinic-counter/build/"
-NAMES = ["문진/동의서", "내시경 동의서", "종검 설명", "폐암사후", "공검 내시경 설명", "예방접종 문진", "특검"]
+NAMES = ["문진/동의서", "내시경 동의서", "종검결과설명", "폐암사후", "공검 내시경 설명", "예방접종예진", "특수검진",
+         "종검상담"]
 # 단순 문진(0)과 내시경 동의서(1)는 '문진/동의서' 하나로 합쳐서 셈. 1번은 예전 기록용으로만 남김(화면에 안 보임)
 MERGED = {1: 0}
-HIDDEN = {1}
+HIDDEN = {1, 4}   # 화면에 안 보이는 업무 (1: 합쳐짐, 4: 공검 내시경 설명 — 예전 기록용)
 
 
 def task_of(t):
@@ -40,7 +41,7 @@ def merge_counts(counts):
     return out
 ROOMS = ("1", "2")
 NAVY = "#d4e4fa"   # 데스크 진료실 제목 줄 색 (파스텔 하늘색)
-TASK_SHORT = ["문진/동의서", "문진/동의서", "종검설명", "폐암사후", "내시경설명", "예방접종", "특검"]   # 데스크 접수 버튼 이름
+TASK_SHORT = ["문진/동의서", "문진/동의서", "종검결과", "폐암사후", "내시경설명", "예방접종", "특수검진", "종검상담"]   # 데스크 접수 버튼 이름
 
 
 def ticket_task(v):
@@ -54,9 +55,7 @@ def acked_call_writes(day, room, call, desk_name=None):
     cid = call["id"]
     w = {"days/%s/calls/%s/%s" % (day, room, cid): {"time": call.get("time") or now_hms(),
                                                     "desk": desk_name or call.get("acked")}}
-    k = ticket_task(dig(call, "ticket", "v"))
-    if k is not None:
-        w["days/%s/events/auto%s" % (day, cid)] = {"room": room, "task": k, "time": now_hms(), "auto": True}
+    # 상세(업무별) 카운트는 진료실 알림 확인으로만 셈 → 호출 확인에서는 진료 완료만 기록 (두 번 세지 않게)
     return w
 FONT = "Malgun Gothic"
 BG = "#f7f9fd"
@@ -485,7 +484,18 @@ SOUNDS = {
 }
 DEFAULT_SOUNDS = {"1": "딩동", "2": "딩동 (낮게)", "staff1": "딩동 두 번", "staff2": "딩동 두 번 (낮게)",
                   "staff": "딩동 두 번", "msg": "무음"}
-DEFAULT_MSG_BUTTONS = ["대기", "폐암사후", "종검결과"]
+DEFAULT_MSG_BUTTONS = ["특수검진", "종검결과설명", "폐암사후", "종검상담", "예방접종예진"]
+OLD_MSG_BUTTONS = ["대기", "폐암사후", "종검결과"]   # 예전 기본값 (그대로면 새 기본값으로 바꿈)
+
+
+def msg_task(label):
+    """진료실 알림 버튼 이름 → 과장님이 확인할 때 자동으로 셀 업무 번호 (해당 없으면 None)"""
+    t = (label or "").replace(" ", "")
+    for words, k in ((("폐암",), 3), (("종검상담",), 7), (("종검",), 2), (("예방", "접종"), 5),
+                     (("특검", "특수검진"), 6), (("내시경", "공검"), 4), (("동의서", "문진"), 0)):
+        if any(w in t for w in words):
+            return k
+    return None
 STAFF_ROOM_NO = {"1": "7", "2": "8"}   # 화면 표시: 진료실 1 → 7번 진료실, 진료실 2 → 8번 진료실
 
 
@@ -499,7 +509,7 @@ def msg_text(label):
     label = (label or "").strip()
     if label in ("", "대기", "환자 대기"):
         return "과장님, 환자 대기중입니다"
-    if not label.endswith("상담"):
+    if not label.endswith(("상담", "예진", "설명", "결과", "검사", "검진")):
         label += " 상담"
     return "과장님, %s 대기중입니다" % label
 
@@ -798,7 +808,8 @@ def _darker(color, f):
 
 # 데스크 접수 버튼 색 (배경, 글씨) — 업무마다 다른 파스텔
 TASK_COLORS = {0: ("#cfe2ff", "#1d4e9e"), 6: ("#ccefdf", "#1b6a48"), 2: ("#e4ddfb", "#4b3a99"),
-               4: ("#ffe2cd", "#984818"), 3: ("#fde0ea", "#9b2f55"), 5: ("#fff0c0", "#856000")}
+               4: ("#ffe2cd", "#984818"), 3: ("#fde0ea", "#9b2f55"), 5: ("#fff0c0", "#856000"),
+               7: ("#ffe2cd", "#984818")}
 
 
 class StatsWindow:
@@ -997,13 +1008,13 @@ class StatsWindow:
             head = ["날짜"]
             for r in self.rooms:
                 head += ["%s 진료완료" % room_label(r)] + ["%s %s" % (room_label(r), n) for i, n in enumerate(NAMES)
-                                                         if i not in HIDDEN]
+                                                         if i not in MERGED]
             w.writerow(head)
             for day in sorted(self.days):
                 row = [day]
                 for r in self.rooms:
                     p, t, _ = self.days[day][r]
-                    row += [p] + t
+                    row += [p] + [c for i, c in enumerate(t) if i not in MERGED]
                 w.writerow(row)
         messagebox.showinfo("저장 완료", "CSV 파일을 저장했습니다.", parent=self.win)
 
@@ -15504,15 +15515,9 @@ class DeskApp:
                 b.grid(row=row, column=col, columnspan=span, sticky="ew", padx=3, pady=3)
                 return b
 
-            # 접수할 때 업무를 골라 대기 등록
-            # 큰 4칸: 문진/동의서 · 특검 / 종검설명 · 내시경설명   작은 줄: 폐암사후 · 예방접종 · 등록 취소
-            for (text, k), (row, col) in zip(((TASK_SHORT[0], 0), (TASK_SHORT[6], 6),
-                                              (TASK_SHORT[2], 2), (TASK_SHORT[4], 4)),
-                                             ((0, 0), (0, 3), (1, 0), (1, 3))):
-                cell_button(text, lambda r=r, k=k: self.add(r, k), row, col, 3, True, k)
-            cell_button(TASK_SHORT[3], lambda r=r: self.add(r, 3), 2, 0, 2, False, 3)
-            cell_button(TASK_SHORT[5], lambda r=r: self.add(r, 5), 2, 2, 2, False, 5)
-            cell_button("↶ 등록 취소", lambda r=r: self.remove(r), 2, 4, 2, False).config(
+            # 대기 등록은 버튼 하나 (업무 분류는 진료실 알림 버튼으로)
+            cell_button("＋ 대기 등록", lambda r=r: self.add(r), 0, 0, 4, True, 0)
+            cell_button("↶ 등록 취소", lambda r=r: self.remove(r), 0, 4, 2, True).config(
                 fg="#a94848", bg="#fbe9e9")
             for c in range(6):
                 grid.columnconfigure(c, weight=1, uniform="t")
@@ -15521,14 +15526,20 @@ class DeskApp:
                               font=(FONT, 12, "bold"), height=46, command=lambda r=r: self.ack(r))
             mb = tk.Frame(box, bg="#eaf2fc")
             mb.pack(fill="x", pady=(6, 0))
-            tk.Label(mb, text="진료실 알림", bg="#eaf2fc", fg="#65738a", font=(FONT, 8)).pack(anchor="w")
+            tk.Label(mb, text="진료실 알림 (과장님께 팝업, 확인하면 카운트)", bg="#eaf2fc", fg="#65738a",
+                     font=(FONT, 8)).pack(anchor="w")
             mbr = tk.Frame(mb, bg="#eaf2fc")
             mbr.pack(fill="x")
-            for label in (self.cfg.get("msg_buttons") or DEFAULT_MSG_BUTTONS):
-                RoundButton(mbr, text=label, bg="#ffeab5", fg="#6b4a00", font=(FONT, 10, "bold"), height=34,
-                            radius=10, width=len(label) * 15 + 26,
-                            command=lambda r=r, label=label: self.send_msg(r, label)).pack(
-                    side="left", padx=(0, 4), pady=1)
+            if self.cfg.get("msg_buttons") in (OLD_MSG_BUTTONS, ["폐암사후", "종검상담", "예방접종 예진"]):   # 예전 기본 알림 버튼 → 새 기본값
+                self.cfg["msg_buttons"] = list(DEFAULT_MSG_BUTTONS)
+            for c in range(3):
+                mbr.columnconfigure(c, weight=1, uniform="m")
+            for i, label in enumerate(self.cfg.get("msg_buttons") or DEFAULT_MSG_BUTTONS):
+                k = msg_task(label)
+                bgc, fgc = TASK_COLORS.get(k, ("#ffeab5", "#6b4a00"))
+                RoundButton(mbr, text=label, bg=bgc, fg=fgc, font=(FONT, 10, "bold"), height=36, radius=10,
+                            command=lambda r=r, label=label: self.send_msg(r, label)).grid(
+                    row=i // 3, column=i % 3, sticky="ew", padx=2, pady=2)
             mrow2 = tk.Frame(mb, bg="#eaf2fc")
             mrow2.pack(fill="x")
             msginfo = tk.Label(mrow2, bg="#eaf2fc", fg="#8a6d1d", font=(FONT, 8), anchor="w")
@@ -15539,14 +15550,11 @@ class DeskApp:
             tl.pack(fill="x", pady=(8, 0))
             count = tk.Label(tl, bg="#eaf2fc", font=(FONT, 9, "bold"), anchor="w")
             count.pack(fill="x")
-            tk.Label(tl, text="업무별 (누르면 상세)", bg="#eaf2fc", fg="#65738a",
-                     font=(FONT, 8)).pack(anchor="w")
+            # (업무별 상세 목록은 화면에 안 보임 — 진료 카운트만 표시)
             rows = []
             for i, name in enumerate(NAMES):
                 lab = tk.Label(tl, bg="white", fg="#22324a", font=(FONT, 9), anchor="w",
                                padx=6, cursor="hand2")
-                if i not in HIDDEN:   # 합쳐진 업무(내시경 동의서)는 '문진/동의서'에 포함
-                    lab.pack(fill="x", pady=1)
                 lab.bind("<Button-1>", lambda e, r=r, i=i: self.task_detail(r, i))
                 rows.append(lab)
             self.w[r] = {"box": box, "own": own, "big": big, "done": done, "brow": brow, "call": call,
@@ -15624,7 +15632,7 @@ class DeskApp:
             for tid in order[:8]:
                 v = q.get(tid) or {}
                 k = ticket_task(v)
-                items.append((TASK_SHORT[k] if k is not None else "미정", str(v.get("t", ""))[:5]))
+                items.append((TASK_SHORT[k] if k is not None else "대기", str(v.get("t", ""))[:5]))
             sig = (tuple(items), len(order))
             if w.get("qsig") != sig:   # 바뀌었을 때만 다시 그림
                 w["qsig"] = sig
@@ -15826,10 +15834,6 @@ class DeskApp:
         m.add_separator()
         m.add_command(label="▲ 앞으로 한 칸", command=lambda: self.shift_ticket(r, tid, -1))
         m.add_command(label="▼ 뒤로 한 칸", command=lambda: self.shift_ticket(r, tid, 1))
-        sub = tk.Menu(m, tearoff=0, font=(FONT, 11))
-        for k in (0, 6, 2, 4, 3, 5):
-            sub.add_command(label=TASK_SHORT[k], command=lambda k=k: self.retask_ticket(r, tid, k))
-        m.add_cascade(label="✎ 업무 바꾸기", menu=sub)
         m.add_separator()
         m.add_command(label="✕ 대기에서 빼기", foreground="#a94848", command=lambda: self.drop_ticket(r, tid))
         try:
@@ -15873,7 +15877,7 @@ class DeskApp:
                 g.attributes("-alpha", 0.85)
             except tk.TclError:
                 pass
-            tk.Label(g, text="  ↕ %s  " % (TASK_SHORT[k] if k is not None else "미정"), bg="#fff1e6", fg="#1f2f48",
+            tk.Label(g, text="  ↕ %s  " % (TASK_SHORT[k] if k is not None else "대기"), bg="#fff1e6", fg="#1f2f48",
                      font=(FONT, 11, "bold"), relief="solid", bd=1, pady=4).pack()
             d["ghost"] = g
         d["ghost"].geometry("+%d+%d" % (e.x_root + 12, e.y_root + 8))

@@ -20,10 +20,11 @@ from tkinter import ttk, messagebox, filedialog, simpledialog
 VERSION = "v13"
 BUILD_VERSION = "dev"   # GitHub에서 exe를 만들 때 자동으로 바뀜
 UPDATE_BASE = "https://raw.githubusercontent.com/qorwl503/clinic-counter/build/"
-NAMES = ["문진/동의서", "내시경 동의서", "종검 설명", "폐암사후", "공검 내시경 설명", "예방접종 문진", "특검"]
+NAMES = ["문진/동의서", "내시경 동의서", "종검결과설명", "폐암사후", "공검 내시경 설명", "예방접종예진", "특수검진",
+         "종검상담"]
 # 단순 문진(0)과 내시경 동의서(1)는 '문진/동의서' 하나로 합쳐서 셈. 1번은 예전 기록용으로만 남김(화면에 안 보임)
 MERGED = {1: 0}
-HIDDEN = {1}
+HIDDEN = {1, 4}   # 화면에 안 보이는 업무 (1: 합쳐짐, 4: 공검 내시경 설명 — 예전 기록용)
 
 
 def task_of(t):
@@ -40,7 +41,7 @@ def merge_counts(counts):
     return out
 ROOMS = ("1", "2")
 NAVY = "#d4e4fa"   # 데스크 진료실 제목 줄 색 (파스텔 하늘색)
-TASK_SHORT = ["문진/동의서", "문진/동의서", "종검설명", "폐암사후", "내시경설명", "예방접종", "특검"]   # 데스크 접수 버튼 이름
+TASK_SHORT = ["문진/동의서", "문진/동의서", "종검결과", "폐암사후", "내시경설명", "예방접종", "특수검진", "종검상담"]   # 데스크 접수 버튼 이름
 
 
 def ticket_task(v):
@@ -54,9 +55,7 @@ def acked_call_writes(day, room, call, desk_name=None):
     cid = call["id"]
     w = {"days/%s/calls/%s/%s" % (day, room, cid): {"time": call.get("time") or now_hms(),
                                                     "desk": desk_name or call.get("acked")}}
-    k = ticket_task(dig(call, "ticket", "v"))
-    if k is not None:
-        w["days/%s/events/auto%s" % (day, cid)] = {"room": room, "task": k, "time": now_hms(), "auto": True}
+    # 상세(업무별) 카운트는 진료실 알림 확인으로만 셈 → 호출 확인에서는 진료 완료만 기록 (두 번 세지 않게)
     return w
 FONT = "Malgun Gothic"
 BG = "#f7f9fd"
@@ -485,7 +484,18 @@ SOUNDS = {
 }
 DEFAULT_SOUNDS = {"1": "딩동", "2": "딩동 (낮게)", "staff1": "딩동 두 번", "staff2": "딩동 두 번 (낮게)",
                   "staff": "딩동 두 번", "msg": "무음"}
-DEFAULT_MSG_BUTTONS = ["대기", "폐암사후", "종검결과"]
+DEFAULT_MSG_BUTTONS = ["특수검진", "종검결과설명", "폐암사후", "종검상담", "예방접종예진"]
+OLD_MSG_BUTTONS = ["대기", "폐암사후", "종검결과"]   # 예전 기본값 (그대로면 새 기본값으로 바꿈)
+
+
+def msg_task(label):
+    """진료실 알림 버튼 이름 → 과장님이 확인할 때 자동으로 셀 업무 번호 (해당 없으면 None)"""
+    t = (label or "").replace(" ", "")
+    for words, k in ((("폐암",), 3), (("종검상담",), 7), (("종검",), 2), (("예방", "접종"), 5),
+                     (("특검", "특수검진"), 6), (("내시경", "공검"), 4), (("동의서", "문진"), 0)):
+        if any(w in t for w in words):
+            return k
+    return None
 STAFF_ROOM_NO = {"1": "7", "2": "8"}   # 화면 표시: 진료실 1 → 7번 진료실, 진료실 2 → 8번 진료실
 
 
@@ -499,7 +509,7 @@ def msg_text(label):
     label = (label or "").strip()
     if label in ("", "대기", "환자 대기"):
         return "과장님, 환자 대기중입니다"
-    if not label.endswith("상담"):
+    if not label.endswith(("상담", "예진", "설명", "결과", "검사", "검진")):
         label += " 상담"
     return "과장님, %s 대기중입니다" % label
 
@@ -798,7 +808,8 @@ def _darker(color, f):
 
 # 데스크 접수 버튼 색 (배경, 글씨) — 업무마다 다른 파스텔
 TASK_COLORS = {0: ("#cfe2ff", "#1d4e9e"), 6: ("#ccefdf", "#1b6a48"), 2: ("#e4ddfb", "#4b3a99"),
-               4: ("#ffe2cd", "#984818"), 3: ("#fde0ea", "#9b2f55"), 5: ("#fff0c0", "#856000")}
+               4: ("#ffe2cd", "#984818"), 3: ("#fde0ea", "#9b2f55"), 5: ("#fff0c0", "#856000"),
+               7: ("#ffe2cd", "#984818")}
 
 
 class StatsWindow:
@@ -997,13 +1008,13 @@ class StatsWindow:
             head = ["날짜"]
             for r in self.rooms:
                 head += ["%s 진료완료" % room_label(r)] + ["%s %s" % (room_label(r), n) for i, n in enumerate(NAMES)
-                                                         if i not in HIDDEN]
+                                                         if i not in MERGED]
             w.writerow(head)
             for day in sorted(self.days):
                 row = [day]
                 for r in self.rooms:
                     p, t, _ = self.days[day][r]
-                    row += [p] + t
+                    row += [p] + [c for i, c in enumerate(t) if i not in MERGED]
                 w.writerow(row)
         messagebox.showinfo("저장 완료", "CSV 파일을 저장했습니다.", parent=self.win)
 
@@ -15308,7 +15319,7 @@ FONT_FILES = {
 CONFIG_FILE = DATA_DIR / "doctor.json"
 OUTBOX_FILE = DATA_DIR / "doctor_outbox.json"
 OLD_COUNTS = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "ClinicCounter" / "counts.json"
-COLORS = ["#286bd5", "#0f8b7c", "#9557bd", "#c77923", "#b34d79", "#527a38", "#6576a3"]
+COLORS = ["#286bd5", "#0f8b7c", "#9557bd", "#c77923", "#b34d79", "#527a38", "#1b7a52", "#a2582a"]
 MODS = {"없음": 0, "Ctrl": 2, "Alt": 1, "Shift": 4, "Ctrl+Alt": 3, "Ctrl+Shift": 6, "Alt+Shift": 5}
 KEYS = ["없음"] + ["F%d" % i for i in range(1, 13)]
 ACTIONS = [("task%d" % i, NAMES[i]) for i in range(len(NAMES)) if i not in HIDDEN] + \
@@ -15518,7 +15529,15 @@ class DoctorApp:
             if self.db and isinstance(cur, dict) and cur.get("id") == mid and not cur.get("acked"):
                 self.room_node = mirror_apply(self.room_node, "put", "/msg/acked", True)
                 db, room = self.db, self.room
-                self.runner.submit(lambda: db.put("live/rooms/%s/msg/acked" % room, True))
+                writes = {"live/rooms/%s/msg/acked" % room: True}
+                k = msg_task(m.get("label"))
+                if k is not None and m.get("d") == today():   # 알림 확인 = 그 업무 진료 카운트 +1
+                    ev = {"room": room, "task": k, "time": now_hms(), "auto": "msg"}
+                    writes["days/%s/events/msg%s" % (today(), mid)] = ev
+                    self.events = mirror_apply(self.events, "put", "/events/msg%s" % mid, ev)
+                    self.flash("✔ %s 카운트 +1 (데스크 알림)" % NAMES[k])
+                    self.render()
+                self.runner.submit(lambda: db.patch("", writes))
 
         tk.Button(p, text="확인", width=12, font=(FONT, 11, "bold"), bg="#ffe08a", command=ok).pack(pady=8)
         p.protocol("WM_DELETE_WINDOW", ok)
@@ -15683,9 +15702,6 @@ class DoctorApp:
         prefix = "days/%s/" % today()
         for p, v in writes.items():
             self.events = mirror_apply(self.events, "put", "/" + p[len(prefix):], v)
-        k = ticket_task(dig(call, "ticket", "v"))
-        if k is not None:
-            self.flash("✔ %s 자동 카운트 (데스크 접수)" % NAMES[k])
         db = self.db
         self.runner.submit(lambda: db.patch("", writes), fail=lambda e: sent.discard(cid))
 
