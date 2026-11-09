@@ -15530,7 +15530,8 @@ class DoctorApp:
         bg = "#fff3d6"
         p.configure(bg=bg)
         sw = p.winfo_screenwidth()
-        p.geometry("420x170+%d+80" % max(0, sw // 2 - 210))
+        p.geometry("+%d+80" % max(0, sw // 2 - 210))   # 높이는 글꼴에 맞춰 자동
+        p.minsize(420, 0)
         tk.Label(p, text="📣 " + m.get("text", ""), font=(FONT, 16, "bold"), bg=bg, fg="#6b4a00",
                  wraplength=390).pack(pady=(26, 4))
         tk.Label(p, text="%s · %s" % (m.get("from", "데스크"), m.get("time", "")[:5]),
@@ -15557,7 +15558,7 @@ class DoctorApp:
                     self.render()
                 self.runner.submit(lambda: db.patch("", writes))
 
-        tk.Button(p, text="확인", width=12, font=(FONT, 11, "bold"), bg="#ffe08a", command=ok).pack(pady=8)
+        tk.Button(p, text="확인", width=12, font=(FONT, 11, "bold"), bg="#ffe08a", command=ok).pack(pady=(8, 14))
         p.protocol("WM_DELETE_WINDOW", ok)
 
     def set_status(self, text, color):

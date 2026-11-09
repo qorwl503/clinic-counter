@@ -15515,7 +15515,7 @@ class DeskApp:
             big = stat_card(0, "현재 대기 환자", "#e3edff", "#2457b5", "#1d62b2", 20)
             done = stat_card(1, "오늘 진료 완료", "#e1f4e8", "#21804c", "#21804c", 16)
             waitinfo = tk.Frame(box, bg="#eaf2fc")   # 대기 순서 (접수한 업무를 순서대로 칩으로 표시)
-            waitinfo.pack(fill="x", pady=(6, 0))
+            # (대기 순서 칸은 화면에 안 보임 — 업무 분류 없이 명수만 등록하므로)
             waitinfo.columnconfigure(0, weight=1, uniform="q")
             waitinfo.columnconfigure(1, weight=1, uniform="q")
             call = tk.Label(box, bg="#eaf2fc", fg="#56647b", font=(FONT, 9), anchor="w",
@@ -16171,7 +16171,8 @@ class DeskApp:
         p.title("%s 직원 호출" % room_label(r))
         sw = p.winfo_screenwidth()
         x = sw // 2 - 460 if r == "1" else sw // 2 + 20
-        p.geometry("440x190+%d+330" % max(0, x))
+        p.geometry("+%d+330" % max(0, x))   # 높이는 글꼴에 맞춰 자동 (확인 버튼이 잘리지 않게)
+        p.minsize(440, 0)
         p.attributes("-topmost", True)
         bg, fg = "#ece4ff", "#5b2fa8"
         p.configure(bg=bg)
@@ -16180,7 +16181,7 @@ class DeskApp:
                  font=(FONT, 15, "bold"), bg=bg, fg=fg).pack()
         tk.Label(p, text="호출 %s" % when, font=(FONT, 10), bg=bg).pack(pady=(4, 6))
         tk.Button(p, text="확인", width=14, font=(FONT, 11, "bold"), bg="#d6c6ff",
-                  command=lambda: self.staff_ack(r)).pack()
+                  command=lambda: self.staff_ack(r)).pack(pady=(0, 14))
         p.protocol("WM_DELETE_WINDOW", lambda: self.staff_ack(r))
         self.render()
 
@@ -16220,7 +16221,8 @@ class DeskApp:
         p.title("%s 호출" % room_label(r))
         sw = p.winfo_screenwidth()
         x = sw // 2 - 460 if r == "1" else sw // 2 + 20
-        p.geometry("440x190+%d+120" % max(0, x))
+        p.geometry("+%d+120" % max(0, x))   # 높이는 글꼴에 맞춰 자동 (확인 버튼이 잘리지 않게)
+        p.minsize(440, 0)
         p.attributes("-topmost", True)
         p.configure(bg="#fff0df")
         tk.Label(p, text="🔔 " + room_label(r), font=(FONT, 22, "bold"), bg="#fff0df",
@@ -16230,7 +16232,7 @@ class DeskApp:
         tk.Label(p, text="호출 %s%s" % (when, "  (담당 데스크 없음)" if unowned else ""),
                  font=(FONT, 10), bg="#fff0df").pack(pady=(4, 6))
         tk.Button(p, text="확인", width=14, font=(FONT, 11, "bold"), bg="#ffcf9e",
-                  command=lambda: self.ack(r)).pack()
+                  command=lambda: self.ack(r)).pack(pady=(0, 14))
         p.protocol("WM_DELETE_WINDOW", lambda: self.ack(r))
         self.render()
 
