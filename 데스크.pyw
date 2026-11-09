@@ -15644,11 +15644,21 @@ class DeskApp:
                                  font=(FONT, 9, "bold"), width=2).pack(side="left")
                         tk.Label(inner, text=name, bg=inner["bg"], fg="#1f2f48",
                                  font=(FONT, 11, "bold")).pack(side="left", padx=(6, 0))
+                        x = tk.Label(inner, text="✕", bg=inner["bg"], fg="#b05050", font=(FONT, 10, "bold"),
+                                     cursor="hand2", padx=2)
+                        x.pack(side="right", padx=(4, 0))
+                        x.bind("<ButtonRelease-1>", lambda e, r=r, t=tid_: self.drop_ticket(r, t))
                         tk.Label(inner, text=tm, bg=inner["bg"], fg="#6a778c",
                                  font=(FONT, 9)).pack(side="right")
-                        for wdg in [chip, inner] + list(inner.winfo_children()):   # 누르면 고치기 메뉴
-                            wdg.bind("<Button-1>", lambda e, r=r, t=tid_: self.queue_menu(e, r, t))
-                            wdg.config(cursor="hand2")
+                        for wdg in [chip, inner] + [c for c in inner.winfo_children() if c is not x]:
+                            # 끌어서 순서 바꾸기 / 옆방으로 옮기기, 오른쪽 클릭 = 업무 바꾸기 등 메뉴
+                            wdg.bind("<ButtonPress-1>", lambda e, r=r, t=tid_: self.drag_start(e, r, t))
+                            wdg.bind("<B1-Motion>", self.drag_move)
+                            wdg.bind("<ButtonRelease-1>", self.drag_end)
+                            wdg.bind("<Button-3>", lambda e, r=r, t=tid_: self.queue_menu(e, r, t))
+                            wdg.config(cursor="fleur")
+                            wdg.drag_info = (r, n_)
+                        chip.drag_info = (r, n_)
                     if len(order) > 8:
                         tk.Label(w["waitinfo"], text="외 %d명" % (len(order) - 8), bg="#eaf2fc", fg="#56647b",
                                  font=(FONT, 9, "bold")).grid(row=6, column=0, columnspan=2, sticky="w")
@@ -15826,6 +15836,88 @@ class DeskApp:
             m.tk_popup(event.x_root, event.y_root)
         finally:
             m.grab_release()
+
+    # ---------- 끌어서 옮기기 ----------
+    def drag_start(self, e, r, tid):
+        self.drag = {"room": r, "tid": tid, "x": e.x_root, "y": e.y_root, "ghost": None}
+
+    def _drop_target(self, x, y):
+        """마우스 아래: (진료실, 몇 번째 자리 또는 None=맨 뒤)"""
+        wdg = self.root.winfo_containing(x, y)
+        while wdg is not None:
+            info = getattr(wdg, "drag_info", None)
+            if info:
+                return info
+            for r in ROOMS:
+                if r in self.w and wdg is self.w[r]["box"]:
+                    return (r, None)
+            try:
+                wdg = wdg.master
+            except AttributeError:
+                break
+        return None
+
+    def drag_move(self, e):
+        d = getattr(self, "drag", None)
+        if not d:
+            return
+        if d["ghost"] is None:
+            if abs(e.x_root - d["x"]) + abs(e.y_root - d["y"]) < 8:
+                return   # 조금 움직인 건 끌기로 보지 않음
+            v = self._queue(d["room"]).get(d["tid"]) or {}
+            k = ticket_task(v)
+            g = tk.Toplevel(self.root)
+            g.overrideredirect(True)
+            g.attributes("-topmost", True)
+            try:
+                g.attributes("-alpha", 0.85)
+            except tk.TclError:
+                pass
+            tk.Label(g, text="  ↕ %s  " % (TASK_SHORT[k] if k is not None else "미정"), bg="#fff1e6", fg="#1f2f48",
+                     font=(FONT, 11, "bold"), relief="solid", bd=1, pady=4).pack()
+            d["ghost"] = g
+        d["ghost"].geometry("+%d+%d" % (e.x_root + 12, e.y_root + 8))
+        tgt = self._drop_target(e.x_root, e.y_root)
+        self.set_status(("놓으면 %s %s" % (room_label(tgt[0]), "%d번째로" % (tgt[1] + 1) if tgt[1] is not None
+                                          else "맨 뒤로")) if tgt else "여기에 놓으면 취소됩니다", "#2457b5")
+
+    def drag_end(self, e):
+        d, self.drag = getattr(self, "drag", None), None
+        if not d or d["ghost"] is None:
+            return
+        try:
+            d["ghost"].destroy()
+        except tk.TclError:
+            pass
+        tgt = self._drop_target(e.x_root, e.y_root)
+        if not tgt:
+            self.set_status("옮기기 취소", "#56647b")
+            return
+        self.place_ticket(d["room"], d["tid"], tgt[0], tgt[1])
+
+    def place_ticket(self, src, tid, dst, index=None):
+        """대기 환자를 dst 진료실의 index번째 자리로 (None = 맨 뒤). 같은 방이면 순서만 바꿈"""
+        if not self.need_db():
+            return
+        v = self._queue(src).get(tid)
+        if not isinstance(v, dict):
+            return
+        q = self._queue(dst)
+        ids = [t for t in sort_queue(q) if t != tid]
+        if index is None or index > len(ids):
+            index = len(ids)
+        ids.insert(index, tid)
+        orders = [ticket_order(t, q.get(t) if t != tid else v)[0] for t in ids]
+        base = min(orders) if orders else 0
+        writes = {(src, tid): None} if src != dst else {}
+        for n, t in enumerate(ids):
+            val = dict(v if t == tid else q[t])
+            val["o"] = base + n * 1000
+            writes[(dst, t)] = val
+        self._write_queue(writes)
+        k = ticket_task(v)
+        self.set_status("%s → %s %d번째" % (TASK_SHORT[k] if k is not None else "대기", room_label(dst), index + 1),
+                        "#21804c")
 
     def _queue(self, r):
         return dig(self.live, "rooms", r, "queue") or {}
