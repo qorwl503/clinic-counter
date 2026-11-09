@@ -305,10 +305,16 @@ def tickets_today(room_node):
     return sort_queue(dig(room_node, "queue") or {})
 
 
+def live_events(day_node):
+    """취소되지 않은 업무 기록만 (취소한 기록은 지우지 않고 cancelled 표시만 해서 목록에 남김)"""
+    return {k: e for k, e in (dig(day_node, "events") or {}).items()
+            if isinstance(e, dict) and not e.get("cancelled")}
+
+
 def task_counts(day_node, room):
     """오늘(또는 특정일) 업무별 건수 [7]"""
     counts = [0] * len(NAMES)
-    for ev in (dig(day_node, "events") or {}).values():
+    for ev in live_events(day_node).values():
         if isinstance(ev, dict) and ev.get("room") == room:
             t = ev.get("task")
             if isinstance(t, int) and 0 <= t < len(NAMES):
@@ -339,7 +345,7 @@ def completed_count(day_node, room, day, counted):
         return counted
     before = 0   # 첫 호출 확인 기록 전에 누른 진료 카운트 = 그 전에 진료한 환자
     for kind in ("events", "done"):
-        node = dig(day_node, kind) or {}
+        node = (dig(day_node, kind) or {}) if kind == "done" else live_events(day_node)
         if kind == "done":
             node = node.get(room) or {}
         for v in node.values():
@@ -347,6 +353,15 @@ def completed_count(day_node, room, day, counted):
                     and str(v.get("time", "")) < times[0]):
                 before += 1
     return before + n
+
+
+def fill_basic(counts, completed):
+    """알림이 없던 나머지 진료 완료 환자는 '문진/동의서'로 채움 (진료 카운트 합계 = 진료 완료)"""
+    c = list(counts)
+    gap = completed - sum(c)
+    if gap > 0:
+        c[0] += gap
+    return c
 
 
 def count_text(counted):
@@ -893,8 +908,10 @@ class StatsWindow:
                 done = dig(node, "done", r) or {}
                 d[r][0] = len(done) + sum(d[r][1])
                 calls.setdefault(day, {})[r] = completed_count(node, r, day, d[r][0])
+                d[r][1] = fill_basic(d[r][1], calls[day][r] - len(done))   # 나머지는 문진/동의서로
+                d[r][0] = len(done) + sum(d[r][1])
                 times = [v for v in done.values() if isinstance(v, dict)]
-                times += [e for e in (dig(node, "events") or {}).values()
+                times += [e for e in live_events(node).values()
                           if isinstance(e, dict) and e.get("room") == r]
                 for v in times:
                     try:
@@ -1034,7 +1051,7 @@ class StatsWindow:
         def write(days):
             rows = []
             for day, node in days.items():
-                for e in (dig(node, "events") or {}).values():
+                for e in live_events(node).values():
                     if isinstance(e, dict) and e.get("room") in self.rooms:
                         t = e.get("task")
                         name = NAMES[task_of(t)] if isinstance(t, int) and 0 <= t < len(NAMES) else "?"
@@ -1124,7 +1141,7 @@ class TaskLogWindow:
         t = NAMES.index(self.task.get()) if self.task.get() in NAMES else 3
         rows = []   # (날짜, 시각, 진료실, 건수)
         for day, node in (ev or {}).items():
-            for e in (dig(node, "events") or {}).values():
+            for e in live_events(node).values():
                 if isinstance(e, dict) and task_of(e.get("task")) == t and e.get("room") in ROOMS:
                     rows.append((day, str(e.get("time", "")), e.get("room"), 1))
         for r in ROOMS:   # 이전 버전(v12) 기록은 시각 없이 건수만
@@ -1223,7 +1240,7 @@ class TaskDetail:
             cnt = {"d": 0, "m": 0, "y": 0}
             last, times = None, []
             for day, node in days.items():
-                for e in (dig(node, "events") or {}).values():
+                for e in live_events(node).values():
                     if isinstance(e, dict) and e.get("room") == room and task_of(e.get("task")) == task:
                         stamp = (day, e.get("time", ""))
                         last = max(last, stamp) if last else stamp
@@ -15526,7 +15543,8 @@ class DoctorApp:
             except tk.TclError:
                 pass
             cur = self.room_node.get("msg") if isinstance(self.room_node, dict) else None
-            if self.db and isinstance(cur, dict) and cur.get("id") == mid and not cur.get("acked"):
+            if (self.db and isinstance(cur, dict) and cur.get("id") == mid and not cur.get("acked")
+                    and not cur.get("cancelled")):
                 self.room_node = mirror_apply(self.room_node, "put", "/msg/acked", True)
                 db, room = self.db, self.room
                 writes = {"live/rooms/%s/msg/acked" % room: True}
@@ -15720,7 +15738,8 @@ class DoctorApp:
         self.w["nexttask"].config(text=("다음 대기: %s" % TASK_SHORT[k]) if k is not None else "")
         done_calls = completed_count(self.events, self.room, self.events_day or today(), completed)
         self.w["done"].config(text="✔ 진료 완료 %d명" % done_calls)
-        self.w["count"].config(text=count_text(completed), fg="#c0641a")
+        counts = fill_basic(counts, done_calls - len(done))   # 알림 없던 환자는 문진/동의서로
+        self.w["count"].config(text=count_text(len(done) + sum(counts)), fg="#c0641a")
         # 대기 시간 알림: 첫 대기 환자가 5분 넘으면 주황, 10분 넘으면 빨강
         q = self.room_node.get("queue") if isinstance(self.room_node, dict) else None
         mins = []
@@ -15793,11 +15812,15 @@ class DoctorApp:
         for eid, e in (dig(self.events, "events") or {}).items():
             if isinstance(e, dict) and e.get("room") == self.room:
                 t = e.get("task")
-                items.append((eid, "ev", e.get("time", ""),
-                              NAMES[task_of(t)] if isinstance(t, int) and 0 <= t < len(NAMES) else "?"))
+                label = NAMES[task_of(t)] if isinstance(t, int) and 0 <= t < len(NAMES) else "?"
+                if e.get("auto") == "msg":
+                    label += " (알림)"
+                if e.get("cancelled"):   # 취소된 기록도 목록에 남겨서 확인 가능
+                    label += "   ✕ 취소됨 %s" % str(e.get("cancelled_at", ""))[:5]
+                items.append((eid, "ev", e.get("time", ""), label))
         for eid in done:
             items.append((eid, "done", self.events["done"][self.room][eid].get("time", ""), "✔ 진료 완료"))
-        items.sort(reverse=True)
+        items.sort(key=lambda x: (str(x[2]), x[0]), reverse=True)   # 최근 시각부터
         pend = {op["eid"] for op in self.outbox}
         lb = self.w["list"]
         sel = lb.curselection()
@@ -15805,6 +15828,8 @@ class DoctorApp:
         self.listed = items
         for eid, kind, t, label in items:
             lb.insert(tk.END, "%s    %s%s" % (t, label, "   ⏳미전송" if eid in pend else ""))
+            if "✕ 취소됨" in label:
+                lb.itemconfig(tk.END, fg="#a0a8b5")
         if sel and sel[0] < lb.size():
             lb.selection_set(sel[0])
         n = len(self.outbox)
@@ -15879,7 +15904,7 @@ class DoctorApp:
         self.flash("✔ %s 기록 (진료 카운트 +1)" % NAMES[task], undo_eid=eid)
 
     def unrecord(self, task):
-        evs = dig(self.events, "events") or {}
+        evs = live_events(self.events)
         mine = sorted((k for k, e in evs.items()
                        if isinstance(e, dict) and e.get("room") == self.room and task_of(e.get("task")) == task),
                       key=lambda k: (str(evs[k].get("time", "")), k), reverse=True)   # 가장 최근 기록부터
@@ -15900,6 +15925,9 @@ class DoctorApp:
             self.flash("삭제할 기록을 목록에서 먼저 선택하세요.")
             return
         eid, kind, t, label = self.listed[sel[0]]
+        if "✕ 취소됨" in label:
+            self.flash("이미 취소된 기록입니다.")
+            return
         if messagebox.askyesno("기록 삭제", "%s  %s 기록을 삭제할까요?" % (t, label), parent=self.root):
             self.remove_item(eid, kind)
 
@@ -15927,7 +15955,11 @@ class DoctorApp:
             save_json(OUTBOX_FILE, self.outbox)
             self.render()
             return
-        patch, mirror = {path: None}, [(local, None)]
+        if kind == "ev":   # 지우지 않고 '취소됨' 표시 → 입력 시간 목록에서 확인 가능
+            cv = dict(val, cancelled=True, cancelled_at=now_hms())
+            patch, mirror = {path: cv}, [(local, cv)]
+        else:
+            patch, mirror = {path: None}, [(local, None)]
         if isinstance(ticket, dict) and isinstance(ticket.get("v"), dict) and ticket["v"].get("d") == today():
             patch["live/rooms/%s/queue/%s" % (self.room, ticket["id"])] = ticket["v"]
             mirror.append(("q:" + ticket["id"], ticket["v"]))

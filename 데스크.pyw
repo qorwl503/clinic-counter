@@ -305,10 +305,16 @@ def tickets_today(room_node):
     return sort_queue(dig(room_node, "queue") or {})
 
 
+def live_events(day_node):
+    """취소되지 않은 업무 기록만 (취소한 기록은 지우지 않고 cancelled 표시만 해서 목록에 남김)"""
+    return {k: e for k, e in (dig(day_node, "events") or {}).items()
+            if isinstance(e, dict) and not e.get("cancelled")}
+
+
 def task_counts(day_node, room):
     """오늘(또는 특정일) 업무별 건수 [7]"""
     counts = [0] * len(NAMES)
-    for ev in (dig(day_node, "events") or {}).values():
+    for ev in live_events(day_node).values():
         if isinstance(ev, dict) and ev.get("room") == room:
             t = ev.get("task")
             if isinstance(t, int) and 0 <= t < len(NAMES):
@@ -339,7 +345,7 @@ def completed_count(day_node, room, day, counted):
         return counted
     before = 0   # 첫 호출 확인 기록 전에 누른 진료 카운트 = 그 전에 진료한 환자
     for kind in ("events", "done"):
-        node = dig(day_node, kind) or {}
+        node = (dig(day_node, kind) or {}) if kind == "done" else live_events(day_node)
         if kind == "done":
             node = node.get(room) or {}
         for v in node.values():
@@ -347,6 +353,15 @@ def completed_count(day_node, room, day, counted):
                     and str(v.get("time", "")) < times[0]):
                 before += 1
     return before + n
+
+
+def fill_basic(counts, completed):
+    """알림이 없던 나머지 진료 완료 환자는 '문진/동의서'로 채움 (진료 카운트 합계 = 진료 완료)"""
+    c = list(counts)
+    gap = completed - sum(c)
+    if gap > 0:
+        c[0] += gap
+    return c
 
 
 def count_text(counted):
@@ -893,8 +908,10 @@ class StatsWindow:
                 done = dig(node, "done", r) or {}
                 d[r][0] = len(done) + sum(d[r][1])
                 calls.setdefault(day, {})[r] = completed_count(node, r, day, d[r][0])
+                d[r][1] = fill_basic(d[r][1], calls[day][r] - len(done))   # 나머지는 문진/동의서로
+                d[r][0] = len(done) + sum(d[r][1])
                 times = [v for v in done.values() if isinstance(v, dict)]
-                times += [e for e in (dig(node, "events") or {}).values()
+                times += [e for e in live_events(node).values()
                           if isinstance(e, dict) and e.get("room") == r]
                 for v in times:
                     try:
@@ -1034,7 +1051,7 @@ class StatsWindow:
         def write(days):
             rows = []
             for day, node in days.items():
-                for e in (dig(node, "events") or {}).values():
+                for e in live_events(node).values():
                     if isinstance(e, dict) and e.get("room") in self.rooms:
                         t = e.get("task")
                         name = NAMES[task_of(t)] if isinstance(t, int) and 0 <= t < len(NAMES) else "?"
@@ -1124,7 +1141,7 @@ class TaskLogWindow:
         t = NAMES.index(self.task.get()) if self.task.get() in NAMES else 3
         rows = []   # (날짜, 시각, 진료실, 건수)
         for day, node in (ev or {}).items():
-            for e in (dig(node, "events") or {}).values():
+            for e in live_events(node).values():
                 if isinstance(e, dict) and task_of(e.get("task")) == t and e.get("room") in ROOMS:
                     rows.append((day, str(e.get("time", "")), e.get("room"), 1))
         for r in ROOMS:   # 이전 버전(v12) 기록은 시각 없이 건수만
@@ -1223,7 +1240,7 @@ class TaskDetail:
             cnt = {"d": 0, "m": 0, "y": 0}
             last, times = None, []
             for day, node in days.items():
-                for e in (dig(node, "events") or {}).values():
+                for e in live_events(node).values():
                     if isinstance(e, dict) and e.get("room") == room and task_of(e.get("task")) == task:
                         stamp = (day, e.get("time", ""))
                         last = max(last, stamp) if last else stamp
@@ -15532,14 +15549,16 @@ class DeskApp:
             mbr.pack(fill="x")
             if self.cfg.get("msg_buttons") in (OLD_MSG_BUTTONS, ["폐암사후", "종검상담", "예방접종 예진"]):   # 예전 기본 알림 버튼 → 새 기본값
                 self.cfg["msg_buttons"] = list(DEFAULT_MSG_BUTTONS)
-            for c in range(3):
+            for c in range(6):
                 mbr.columnconfigure(c, weight=1, uniform="m")
             for i, label in enumerate(self.cfg.get("msg_buttons") or DEFAULT_MSG_BUTTONS):
                 k = msg_task(label)
                 bgc, fgc = TASK_COLORS.get(k, ("#ffeab5", "#6b4a00"))
+                # 윗줄 2개(특수검진·종검결과설명) 크게, 아랫줄 3개(폐암사후·종검상담·예방접종예진)
+                row_, col_, span_ = (0, i * 3, 3) if i < 2 else (1 + (i - 2) // 3, ((i - 2) % 3) * 2, 2)
                 RoundButton(mbr, text=label, bg=bgc, fg=fgc, font=(FONT, 10, "bold"), height=36, radius=10,
                             command=lambda r=r, label=label: self.send_msg(r, label)).grid(
-                    row=i // 3, column=i % 3, sticky="ew", padx=2, pady=2)
+                    row=row_, column=col_, columnspan=span_, sticky="ew", padx=2, pady=2)
             mrow2 = tk.Frame(mb, bg="#eaf2fc")
             mrow2.pack(fill="x")
             msginfo = tk.Label(mrow2, bg="#eaf2fc", fg="#8a6d1d", font=(FONT, 8), anchor="w")
@@ -15625,7 +15644,8 @@ class DeskApp:
             except tk.TclError:
                 pass
             w["done"].config(text=txt)
-            w["count"].config(text=count_text(patients), fg="#c0641a")
+            filled = fill_basic(counts, completed - len(done_ids(self.events, r)))   # 나머지는 문진/동의서로
+            w["count"].config(text=count_text(len(done_ids(self.events, r)) + sum(filled)), fg="#c0641a")
             q = dig(node, "queue") or {}
             order = tickets_today(node)
             items = []
@@ -15697,7 +15717,7 @@ class DeskApp:
                          "✔ 과장님 확인" if m.get("acked") else "확인 전")
                 w["msginfo"].config(text="%s '%s' 보냄 · %s" % (m.get("time", "")[:5], m.get("label", ""), state),
                                     fg="#21804c" if m.get("acked") else "#8a6d1d")
-                if m.get("acked") or m.get("cancelled"):
+                if m.get("cancelled"):   # 과장님 확인 뒤에도 취소 가능 (카운트도 빠짐)
                     w["msgcancel"].pack_forget()
                 else:
                     w["msgcancel"].pack(side="right")
@@ -16082,12 +16102,20 @@ class DeskApp:
     def cancel_msg(self, r):
         """잘못 보낸 진료실 알림 취소 → 진료실 팝업이 닫힘"""
         m = dig(self.live, "rooms", r, "msg")
-        if not self.need_db() or not isinstance(m, dict) or m.get("acked") or m.get("cancelled"):
+        if not self.need_db() or not isinstance(m, dict) or m.get("cancelled"):
             return
         self.live = mirror_apply(self.live, "put", "/rooms/%s/msg/cancelled" % r, True)
         self.render()
-        db = self.db
-        self.runner.submit(lambda: db.put("live/rooms/%s/msg/cancelled" % r, True), fail=self.fail)
+        db, mid, day = self.db, m.get("id"), m.get("d") or today()
+        writes = {"live/rooms/%s/msg/cancelled" % r: True}
+
+        def job():
+            if m.get("acked") and mid:   # 이미 확인해서 카운트됐으면 그 카운트도 취소 표시
+                ev = db.get("days/%s/events/msg%s" % (day, mid))
+                if isinstance(ev, dict) and not ev.get("cancelled"):
+                    writes["days/%s/events/msg%s" % (day, mid)] = dict(ev, cancelled=True, cancelled_at=now_hms())
+            db.patch("", writes)
+        self.runner.submit(job, fail=self.fail)
 
     # ---------- 직원 호출 ----------
     def check_staff(self):
